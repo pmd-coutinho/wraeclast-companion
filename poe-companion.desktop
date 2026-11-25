@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Wraeclast Companion
+Comment=Path of Exile 1 campaign guide and build desk
+Exec=poe-companion
+Icon=applications-games
+Terminal=false
+Categories=Utility;

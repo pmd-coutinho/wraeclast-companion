@@ -1,0 +1,242 @@
+[
+  {
+    "act": 1,
+    "title": "The Twilight Strand",
+    "steps": [
+      {
+        "title": "Reach Lioneye's Watch",
+        "detail": "Defeat Hillock, then enter town and speak with Tarkleigh. Open the waypoint for quick returns.",
+        "tip": "Pick up a movement skill when one becomes available; keep moving during boss attacks."
+      },
+      {
+        "title": "Find the medicine chest",
+        "detail": "Cross the Coast to the Tidal Island and defeat Hailrake. Return to Nessa for the reward.",
+        "tip": "The reward grants a Quicksilver Flask. Use it to cover ground between packs."
+      },
+      {
+        "title": "Open the Submerged Passage",
+        "detail": "Go through the Mud Flats and collect the three glyphs to open the passage. Find the Flooded Depths and defeat the Dweller of the Deep for a passive point.",
+        "tip": "Side quests can grant permanent passive points; check the quest log before leaving an act."
+      },
+      {
+        "title": "Break the seal",
+        "detail": "From the Submerged Passage, reach the Ledge and climb to the Prison. Complete the Lower Prison trial, then defeat Brutus.",
+        "tip": "Brutus hits hard at close range. Add life to gear and keep a life flask ready."
+      },
+      {
+        "title": "Defeat Merveil",
+        "detail": "Cross Prisoner's Gate to the Ship Graveyard. Find the Allflame in the cave and return it to Fairgraves, then continue through the Cavern of Anger and defeat Merveil.",
+        "tip": "Cold resistance helps against Merveil. After the fight, take the exit to Act 2."
+      }
+    ]
+  },
+  {
+    "act": 2,
+    "title": "The Forest Encampment",
+    "steps": [
+      {
+        "title": "Reach the Western Forest",
+        "detail": "Leave the Forest Encampment through the Old Fields to the Crossroads. Kraityn's camp is on Broken Bridge. Oak is in the Wetlands and Alira is in the Western Forest; reach those areas from the Riverways, since Crossroads does not connect directly to Riverways. Defeat Captain Arteri for the Thaumetic Emblem; optionally use it on the Thaumetic Seal to open the route to Prisoner's Gate, then return to Lioneye's Watch and speak with Bestel for the passive point.",
+        "tip": "The Thaumetic Emblem quest is optional. Use waypoints to avoid repeating long routes when checking the bandit camps."
+      },
+      {
+        "title": "Collect the Vaal Ruins keys",
+        "detail": "Defeat the Weaver in the Weaver's Chambers and take the Weaver's Spike. In the Chamber of Sins, find the Baleful Gem and return it to town for the quest turn-in. Bring both items to the blocked entrance in the Wetlands to open the Vaal Ruins.",
+        "tip": "The Chamber of Sins and Weaver are required to open the Vaal Ruins. The Crypt trial is optional Labyrinth preparation."
+      },
+      {
+        "title": "Choose your bandit reward",
+        "detail": "Visit the bandit camps: Kraityn in Broken Bridge, Alira in the Western Forest, and Oak in the Wetlands. Help one, or defeat all three and report to Eramir. Take The Apex after completing the quest, then continue from the Wetlands through the Vaal Ruins toward the Northern Forest, Caverns, and Ancient Pyramid.",
+        "tip": "Alira grants +15% to all elemental resistances. Killing all three grants one passive point; Oak and Kraityn offer other rewards."
+      },
+      {
+        "title": "Defeat the Vaal Oversoul",
+        "detail": "Climb to the highest floor of the Ancient Pyramid. Use The Apex on the Dark Altar to summon the Vaal Oversoul, then defeat it to open the exit to Act 3.",
+        "tip": "The Dark Altar must be activated with The Apex before the boss appears. Move during its telegraphed attacks and recover between phases."
+      }
+    ]
+  },
+  {
+    "act": 3,
+    "title": "The City of Sarn",
+    "steps": [
+      {
+        "title": "Reach the Sarn Encampment",
+        "detail": "Cross the City of Sarn and enter town. Activate the waypoint before going back out.",
+        "tip": "Check vendors for a four-link item with colors that fit your main skill."
+      },
+      {
+        "title": "Get the Sewer Keys",
+        "detail": "Find Clarissa in the City of Sarn and rescue her. In the Crematorium, defeat Piety and recover Tolman's Bracelet. Return both to town; Clarissa gives Sewer Keys for the Slums grating.",
+        "tip": "The sewer busts and Library are optional quests. The bracelet is needed to obtain the keys that open the sewer route."
+      },
+      {
+        "title": "Clear the sewer blockage",
+        "detail": "From the Marketplace, cross the Battlefront for the Ribbon Spool, then visit the Docks for Thaumetic Sulphite. Take both to Dialla at Solaris Temple level 2; she gives you Infernal Talc. Return to the Sewers and use the Talc on the Undying Blockage to open the route to the Ebony Barracks.",
+        "tip": "The turn-in is at Dialla in Solaris Temple level 2, not in town. The Sewer Keys from Clarissa open the earlier Slums grating."
+      },
+      {
+        "title": "Get Piety’s Tower Key",
+        "detail": "From the Ebony Barracks, travel through Lunaris Temple to level 2 and defeat Piety. Take the Tower Key she drops back through the Imperial Gardens to the Sceptre entrance, use it there, then climb to the Upper Sceptre and defeat Dominus.",
+        "tip": "The Tower Key is needed at the Sceptre entrance. Activate waypoints as you pass to make the return trip shorter."
+      }
+    ]
+  },
+  {
+    "act": 4,
+    "title": "Highgate",
+    "steps": [
+      {
+        "title": "Open the Mines",
+        "detail": "Enter the Dried Lake and defeat Voll. Take Deshret's Banner back to town to open the Mines, descend to level 2, and free Deshret's spirit.",
+        "tip": "The Mines waypoint is a useful return point. Keep life and elemental resistances on gear."
+      },
+      {
+        "title": "Bring Dialla the two eyes",
+        "detail": "From the Crystal Veins, find Kaom in Kaom's Dream/Stronghold and take the Eye of Fury. Find Daresso in his Dream/Grand Arena and take the Eye of Desire. Give both to Dialla to open the Belly of the Beast.",
+        "tip": "The quest log points to each king. Activate the Crystal Veins waypoint before exploring both branches."
+      },
+      {
+        "title": "Defeat Malachai and leave the Beast",
+        "detail": "Defeat Piety in the Belly, then enter the Harvest. Defeat the three guardians, take their organs to open the Black Core, and defeat Malachai. In The Ascent, activate the Resonator to open the portal to Act 5.",
+        "tip": "The Resonator in The Ascent is the campaign exit after Malachai; do not stop in Highgate expecting an automatic transition."
+      }
+    ]
+  },
+  {
+    "act": 5,
+    "title": "Overseer's Tower",
+    "steps": [
+      {
+        "title": "Reach the Control Blocks",
+        "detail": "Descend through the Slave Pens and defeat Overseer Krow to reach the Overseer's Tower. From town, enter the Control Blocks and continue the rebellion quest.",
+        "tip": "After Kitava, elemental resistances are reduced by 30%. Replace resistance on gear as you go."
+      },
+      {
+        "title": "Defeat Avarius",
+        "detail": "In the Control Blocks, defeat Justicar Casticus and take his Eye of Zeal. Pass through Oriath Square and the Templar Courts to the Chamber of Innocence, then defeat High Templar Avarius.",
+        "tip": "The Control Blocks also has an optional Miasmeter quest for a passive point. After Avarius, Act 5's route changes."
+      },
+      {
+        "title": "Find the Sign of Purity",
+        "detail": "Return through the Ruined Square to the Ossuary and retrieve the Sign of Purity. The Reliquary is an optional side area with three Kitava's Torments; return them to Lani for a passive point.",
+        "tip": "Finish these optional rewards before the final boss if you want them. Use the quest log to track turn-ins."
+      },
+      {
+        "title": "Defeat Kitava",
+        "detail": "Cross the Cathedral Rooftop to the Cathedral Apex. Use the Sign of Purity to enter the arena and defeat Kitava to reach Act 6.",
+        "tip": "After the fight, elemental resistances fall by 30%. Replace resistance on gear as you go."
+      }
+    ]
+  },
+  {
+    "act": 6,
+    "title": "Lioneye's Watch",
+    "steps": [
+      {
+        "title": "Start the rebellion",
+        "detail": "The Twilight Strand clear is optional; doing it unlocks Lilly Roth as a gem vendor. Continue through the Coast to the Mud Flats, defeat the Dishonoured Queen, take the Eye of Conquest, and use it to open the Karui Fortress.",
+        "tip": "Lilly sells the full gem list after the optional strand quest. The Queen and Eye are required for the main route."
+      },
+      {
+        "title": "Cross the prison route",
+        "detail": "Defeat Tukohama in the Karui Fortress. In the Ridge, enter the Prison, defeat Shavronne, and continue through the Prisoner's Gate. Cross the Western Forest, Riverways, and Southern Forest toward the Beacon.",
+        "tip": "Complete the prison Labyrinth trial if you want to attempt the Labyrinth. Shavronne is on the required prison route."
+      },
+      {
+        "title": "Defeat the Brine King",
+        "detail": "Cross the Riverways and Southern Forest to the Beacon. Light it, sail to the Brine King's Reef, and defeat the Brine King.",
+        "tip": "The Brine King deals heavy cold and lightning damage; check those resistances."
+      }
+    ]
+  },
+  {
+    "act": 7,
+    "title": "The Bridge Encampment",
+    "steps": [
+      {
+        "title": "Open the way to the Vaal City",
+        "detail": "Cross the Broken Bridge and Crossroads. Go through the Fellshrine Ruins to the Crypt, complete its trial, and retrieve Maligaro's Map.",
+        "tip": "Kishara's Star in the Causeway is an optional passive-point quest. Use Maligaro's Map in the Chamber of Sins."
+      },
+      {
+        "title": "Recover the Black Venom and Obsidian Key",
+        "detail": "Use Maligaro's Map in the Chamber of Sins map device and defeat Maligaro in the Sanctum; take the Black Venom from his spider. Return through the open portal to Silk in the Chamber of Sins and give him the Venom; he rewards you with the Obsidian Key. Use the key to open the secret passage from Chamber of Sins level 2 to the Den. From there cross the Ashen Fields to the old Forest Encampment/Fortress Encampment and defeat Greust, Lord of the Forest (Ralakesh); then continue into the Northern Forest and Dread Thicket.",
+        "tip": "The Black Venom must be turned in to Silk in the Chamber of Sins. The Obsidian Key opens the route through the Den; defeating Greust/Ralakesh is part of the required route."
+      },
+      {
+        "title": "Open the Temple of Decay",
+        "detail": "Collect all seven Fireflies in the Dread Thicket. Travel through the Causeway to Vaal City and find Yeena at the web; give her the Fireflies. She burns open the entrance to the Temple of Decay. Descend through its levels and defeat Arakaali.",
+        "tip": "All seven Fireflies are mandatory for Yeena to open the temple. Do not return to the Bridge Encampment for this turn-in; Yeena waits at the web in Vaal City."
+      }
+    ]
+  },
+  {
+    "act": 8,
+    "title": "The Sarn Encampment",
+    "steps": [
+      {
+        "title": "Cross the Doedre tunnels",
+        "detail": "Reach the Toxic Conduits and descend through Doedre's Cesspool. Defeat Doedre, then emerge at the Bath House and complete its Labyrinth trial if you have not already.",
+        "tip": "High Gardens off the Bath House has an optional passive-point quest. The Quay and Grain Gate are also side branches."
+      },
+      {
+        "title": "Collect the Sun and Moon Orbs",
+        "detail": "Visit Solaris Temple and recover the Sun Orb. Visit Lunaris Temple and recover the Moon Orb. Return to town after both are collected; the orbs unlock the Harbour Bridge route.",
+        "tip": "Solaris gives the Sun Orb; Lunaris gives the Moon Orb. Temple waypoints make the return trip faster."
+      },
+      {
+        "title": "Defeat the gods",
+        "detail": "After visiting both temples, enter the Harbour Bridge and defeat the Solaris and Lunaris encounter to reach Act 9.",
+        "tip": "Their attacks cover large areas. Move out of marked zones before attacking."
+      }
+    ]
+  },
+  {
+    "act": 9,
+    "title": "Highgate",
+    "steps": [
+      {
+        "title": "Bring both ingredients to Sin",
+        "detail": "From Highgate cross the Vastiri Desert and Foothills to the Boiling Lake; defeat the Basilisk and take its Acid. Continue through the Tunnel to the Quarry, then visit the Refinery for Trarthan Powder. Bring both items to Sin in the Quarry; he burns open the entrance to the Belly of the Beast.",
+        "tip": "Both quest items are required. The Oasis and Garukhan quests are optional; Garukhan’s turn-in grants a passive point."
+      },
+      {
+        "title": "Meet Sin before the Trinity fight",
+        "detail": "Before leaving the Quarry, optionally visit the Shrine of the Winds and defeat Garukhan, then return to town for the passive point. Enter the Belly of the Beast and continue to the Rotting Core and Black Core. Speak with Sin there to manifest the Depraved Trinity; then defeat its three guardians and the Trinity.",
+        "tip": "The optional Garukhan detour is easiest before entering the Belly. Sin's conversation at the Black Core is required before the guardian encounters and final boss."
+      },
+      {
+        "title": "Unlock Act 10 with Lilly",
+        "detail": "After defeating the Depraved Trinity, return to Highgate and speak with Lilly Roth to gain access to Act 10. Take the newly opened route to Oriath Docks.",
+        "tip": "The Act transition opens after the Trinity is defeated and you speak with Lilly."
+      }
+    ]
+  },
+  {
+    "act": 10,
+    "title": "Oriath Docks",
+    "steps": [
+      {
+        "title": "Rescue Bannon and recover the Staff",
+        "detail": "From Oriath Docks, enter the Cathedral Rooftop and rescue Bannon from the cultists. Continue through the Ravaged Square and Torched Courts to the Desecrated Chambers and Sanctum of Innocence. Defeat Avarius, take the Staff of Purity, and return to Bannon in town to complete the turn-in.",
+        "tip": "Do not leave the Staff behind after the boss. Bannon needs it before Innocence can clear the final route. Entering Act 10 still leaves the resistance penalty at 30 points; it becomes 60 after Kitava."
+      },
+      {
+        "title": "Defeat Vilenta",
+        "detail": "Return to the Ravaged Square and find the Control Blocks. Defeat Vilenta, then return to town for the passive-point reward.",
+        "tip": "The Ossuary trial completes the final Labyrinth trial; do it before the final boss if you have not."
+      },
+      {
+        "title": "Open the Kitava’s Horns passage",
+        "detail": "Go to the Ravaged Square and meet Innocence by Kitava's Horns. Speak with him and let him destroy the Horns to open the Canals; the route is locked until this happens.",
+        "tip": "The Ossuary trial and its side rewards are optional. The Horns are the mandatory gate before the Canals."
+      },
+      {
+        "title": "Defeat Kitava",
+        "detail": "After Innocence opens the Canals, cross them to the Feeding Trough, then enter the Altar of Hunger and defeat Kitava to finish the campaign.",
+        "tip": "After this fight the total resistance penalty is 60 points. Recheck elemental resistances before entering maps."
+      }
+    ]
+  }
+]

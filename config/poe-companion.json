@@ -1,0 +1,5 @@
+{
+  "game_app_id_regex": "(?i)^(?:steam_app_238960|pathofexile(?:_x64)?(?:steam)?(?:client)?(?:\\.exe)?|org\\.pathofexile\\.pathofexile)$",
+  "game_title_regex": "(?i)^path of exile$",
+  "allow_steam_window_identity": false
+}

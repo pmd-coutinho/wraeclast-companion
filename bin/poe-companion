@@ -1,0 +1,44 @@
+#!/usr/bin/env sh
+set -eu
+
+# Resolve symlinks so PATH links keep pointing to the checkout's flake.
+source_path=$0
+while [ -L "$source_path" ]; do
+    source_dir=$(CDPATH= cd -- "$(dirname -- "$source_path")" && pwd -P)
+    link=$(readlink "$source_path")
+    case "$link" in
+        /*) source_path=$link ;;
+        *) source_path=$source_dir/$link ;;
+    esac
+done
+ROOT=$(CDPATH= cd -- "$(dirname -- "$source_path")/.." && pwd -P)
+
+case "${1-}" in
+    --toggle-clickable) cmd="toggle" ;;
+    --next-step) cmd="next-step" ;;
+    --prev-step) cmd="prev-step" ;;
+    --toggle-hud) cmd="toggle-hud" ;;
+    --toggle-compact) cmd="toggle-compact" ;;
+    *) cmd="" ;;
+esac
+if [ -n "$cmd" ]; then
+    sock_py='import pathlib,socket,sys; cmd=sys.argv[1]; p=pathlib.Path.home()/".local/share/poe-companion/control.sock"; s=socket.socket(socket.AF_UNIX); s.settimeout(1); exec("try:\n s.connect(str(p)); s.sendall((cmd+\"\\n\").encode())\nexcept OSError as e:\n print(\"PoE Companion is not running: \"+str(e), file=sys.stderr); sys.exit(1)")'
+    if command -v python3 >/dev/null 2>&1; then
+        exec python3 -c "$sock_py" "$cmd"
+    fi
+    exec nix develop "$ROOT" --command python3 -c "$sock_py" "$cmd"
+fi
+
+# Prefer native system Python when GTK 4, Cairo, and Pillow are installed (e.g. Nobara/Fedora).
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import gi, cairo, PIL; gi.require_version("Gtk", "4.0"); from gi.repository import Gtk' >/dev/null 2>&1; then
+    export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+    exec python3 -m poe_companion.app "$@"
+fi
+
+if command -v nix >/dev/null 2>&1 && [ -f "$ROOT/flake.nix" ]; then
+    exec nix develop "$ROOT" --command sh -c 'export PYTHONPATH="$1${PYTHONPATH:+:$PYTHONPATH}"; shift; exec python3 -m poe_companion.app "$@"' poe-companion "$ROOT" "$@"
+fi
+
+echo "Wraeclast Companion dependencies are missing (GTK 4, PyGObject, PyCairo, Pillow, gtk4-layer-shell)." >&2
+echo "On Nobara/Fedora, run ./install-nobara.sh to install them." >&2
+exit 1

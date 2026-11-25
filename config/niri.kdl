@@ -1,0 +1,12 @@
+// Replace /absolute/path/to/starter with the checkout path before merging.
+// The companion must already be running.
+binds {
+    // Advance / rewind campaign steps without leaving click-through mode.
+    Mod+Shift+Right { spawn "/absolute/path/to/starter/bin/poe-companion" "--next-step"; }
+    Mod+Shift+Left  { spawn "/absolute/path/to/starter/bin/poe-companion" "--prev-step"; }
+    // Toggle compact bar vs expanded details, or hide/show the overlay.
+    Mod+Shift+D     { spawn "/absolute/path/to/starter/bin/poe-companion" "--toggle-compact"; }
+    Mod+Shift+H     { spawn "/absolute/path/to/starter/bin/poe-companion" "--toggle-hud"; }
+    // Toggle pointer interaction with the HUD while Path of Exile is focused.
+    Mod+Shift+P     { spawn "/absolute/path/to/starter/bin/poe-companion" "--toggle-clickable"; }
+}

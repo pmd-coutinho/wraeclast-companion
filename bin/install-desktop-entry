@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+set -eu
+source_path=$0
+while [ -L "$source_path" ]; do
+    source_dir=$(CDPATH= cd -- "$(dirname -- "$source_path")" && pwd -P)
+    link=$(readlink "$source_path")
+    case "$link" in /*) source_path=$link ;; *) source_path=$source_dir/$link ;; esac
+done
+ROOT=$(CDPATH= cd -- "$(dirname -- "$source_path")/.." && pwd -P)
+DEST=${XDG_DATA_HOME:-"$HOME/.local/share"}/applications
+mkdir -p "$DEST"
+python3 - "$ROOT/bin/poe-companion" "$DEST/poe-companion.desktop" <<'PY'
+import sys
+from pathlib import Path
+
+exe, target = sys.argv[1:]
+escaped = exe.replace('\\', '\\\\').replace('"', '\\"').replace(' ', '\\s')
+Path(target).write_text(
+    "[Desktop Entry]\nType=Application\nName=Wraeclast Companion\n"
+    "Comment=Path of Exile 1 campaign guide and build desk\n"
+    f'Exec="{escaped}"\nIcon=applications-games\nTerminal=false\n'
+    "Categories=Utility;\nStartupNotify=false\n"
+)
+print(f"Installed {target}")
+PY
