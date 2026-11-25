@@ -721,12 +721,13 @@ class ClientLogAndHudTests(unittest.TestCase):
     def test_hud_prefs_round_trip_and_compact_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hud.json"
-            prefs = {**app_module.DEFAULT_HUD_PREFS, "position": "top-right", "opacity": 0.75, "compact": False}
+            prefs = {**app_module.DEFAULT_HUD_PREFS, "position": "top-right", "opacity": 0.75, "compact": False, "interactive_controls": False}
             app_module.save_hud_prefs(prefs, path)
             loaded = app_module.load_hud_prefs(path)
             self.assertEqual(loaded["position"], "top-right")
             self.assertAlmostEqual(loaded["opacity"], 0.75)
             self.assertFalse(loaded["compact"])
+            self.assertFalse(loaded["interactive_controls"])
         self.assertEqual(app_module.compact_step_summary("First sentence. Second sentence."), "First sentence.")
 
 

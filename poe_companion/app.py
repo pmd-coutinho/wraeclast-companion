@@ -65,6 +65,7 @@ DEFAULT_HUD_PREFS = {
     "position": "top-center",
     "compact": True,
     "opacity": 0.88,
+    "interactive_controls": True,
     "auto_track_client_log": True,
     "client_log_path": "",
 }
@@ -81,6 +82,8 @@ def load_hud_prefs(path: Path = HUD_PREFS_PATH) -> dict:
         prefs["compact"] = raw["compact"]
     if isinstance(raw.get("opacity"), (int, float)) and not isinstance(raw.get("opacity"), bool):
         prefs["opacity"] = min(0.96, max(0.45, float(raw["opacity"])))
+    if isinstance(raw.get("interactive_controls"), bool):
+        prefs["interactive_controls"] = raw["interactive_controls"]
     if isinstance(raw.get("auto_track_client_log"), bool):
         prefs["auto_track_client_log"] = raw["auto_track_client_log"]
     if isinstance(raw.get("client_log_path"), str) and len(raw["client_log_path"]) <= 1024:
@@ -918,6 +921,14 @@ class Companion(Gtk.Application):
         cmp_box.append(self.hud_compact_switch)
         row1.append(cmp_box)
 
+        mini_box = Gtk.Box(spacing=8)
+        mini_lbl = Gtk.Label(label="Clickable mini-buttons"); mini_lbl.set_xalign(0); mini_box.append(mini_lbl)
+        self.hud_interactive_switch = Gtk.Switch(active=self.hud_prefs["interactive_controls"], valign=Gtk.Align.CENTER)
+        self.hud_interactive_switch.set_tooltip_text("Allow clicking the small ← / → / ▾ buttons on the HUD while keeping the rest of the overlay click-through")
+        self.hud_interactive_switch.connect("notify::active", self._on_hud_pref_changed)
+        mini_box.append(self.hud_interactive_switch)
+        row1.append(mini_box)
+
         pos_box = Gtk.Box(spacing=8, hexpand=True)
         pos_lbl = Gtk.Label(label="Position"); pos_lbl.add_css_class("planner-subtle"); pos_box.append(pos_lbl)
         self.hud_position_combo = Gtk.DropDown.new_from_strings([label for _, label in HUD_POSITIONS])
@@ -996,13 +1007,30 @@ class Companion(Gtk.Application):
             box.set_size_request(420, -1)
             self.hud.set_child(box)
 
-            top_row = Gtk.Box(spacing=10)
+            top_row = Gtk.Box(spacing=6)
             self.hud_act = Gtk.Label()
             self.hud_act.add_css_class("hud-kicker"); self.hud_act.set_xalign(0); self.hud_act.set_hexpand(True)
             top_row.append(self.hud_act)
-            self.hud_mode = Gtk.Label(label="CLICK-THROUGH")
+
+            self.hud_mode = Gtk.Label(label="")
             self.hud_mode.add_css_class("hud-badge")
+            self.hud_mode.set_visible(False)
             top_row.append(self.hud_mode)
+
+            self.hud_mini_controls = Gtk.Box(spacing=3)
+            self.hud_mini_controls.add_css_class("hud-mini-controls")
+            for label, tip, delta in (("‹", "Previous step", -1), ("›", "Next step", 1)):
+                btn = Gtk.Button(label=label)
+                btn.add_css_class("hud-mini-btn")
+                btn.set_tooltip_text(tip)
+                btn.connect("clicked", lambda _b, d=delta: self.move_step(d))
+                self.hud_mini_controls.append(btn)
+            self.hud_compact_btn = Gtk.Button(label="▾")
+            self.hud_compact_btn.add_css_class("hud-mini-btn")
+            self.hud_compact_btn.set_tooltip_text("Expand / compact HUD")
+            self.hud_compact_btn.connect("clicked", lambda *_: self.toggle_hud_compact())
+            self.hud_mini_controls.append(self.hud_compact_btn)
+            top_row.append(self.hud_mini_controls)
             box.append(top_row)
 
             self.hud_progress = Gtk.ProgressBar()
@@ -1039,21 +1067,9 @@ class Companion(Gtk.Application):
             self.hud_context.set_lines(2)
             box.append(self.hud_context)
 
-            self.hud_actions = Gtk.Box(spacing=6)
-            for label, delta in (("← Prev", -1), ("Next →", 1)):
-                button = Gtk.Button(label=label)
-                button.add_css_class("hud-btn")
-                button.connect("clicked", lambda _b, d=delta: self.move_step(d))
-                self.hud_actions.append(button)
-            toggle_btn = Gtk.Button(label="Details")
-            toggle_btn.add_css_class("hud-btn")
-            toggle_btn.connect("clicked", lambda *_: self.toggle_hud_compact())
-            self.hud_compact_btn = toggle_btn
-            self.hud_actions.append(toggle_btn)
-            box.append(self.hud_actions)
-
             self.hud.add_css_class("campaign-hud")
             self.hud.connect("realize", lambda *_: self.apply_input_region(self.clickable))
+            self.hud.connect("map", lambda *_: GLib.idle_add(self._sync_hud_input_region))
             self.hud.set_visible(False)
 
             self.hud_css = Gtk.CssProvider()
@@ -1088,11 +1104,22 @@ class Companion(Gtk.Application):
         Layer.set_margin(self.hud, Layer.Edge.RIGHT, 20 if right else 0)
 
         compact = bool(self.hud_prefs.get("compact", True))
+        interactive_controls = bool(self.hud_prefs.get("interactive_controls", True))
         self.hud_summary.set_visible(compact)
         self.hud_expanded_box.set_visible(not compact)
-        self.hud_actions.set_visible(self.clickable or not compact)
+        if hasattr(self, "hud_mini_controls"):
+            self.hud_mini_controls.set_visible(self.clickable or interactive_controls)
         if hasattr(self, "hud_compact_btn"):
-            self.hud_compact_btn.set_label("Expand" if compact else "Compact")
+            self.hud_compact_btn.set_label("▾" if compact else "▴")
+        if hasattr(self, "hud_mode"):
+            if self.clickable:
+                self.hud_mode.set_text("INTERACTIVE")
+                self.hud_mode.set_visible(True)
+            elif not interactive_controls:
+                self.hud_mode.set_text("LOCKED")
+                self.hud_mode.set_visible(True)
+            else:
+                self.hud_mode.set_visible(False)
 
         alpha = min(0.96, max(0.45, float(self.hud_prefs.get("opacity", 0.88))))
         border_alpha = min(0.95, alpha + 0.06)
@@ -1121,18 +1148,26 @@ class Companion(Gtk.Application):
             .hud-context {{ font-size: 11px; color: #8da2b8; }}
             .hud-progress trough {{ background: rgba(29, 42, 58, 0.85); min-height: 4px; border-radius: 4px; }}
             .hud-progress progress {{ background: #d9a44b; min-height: 4px; border-radius: 4px; }}
-            .hud-btn {{
-                min-height: 26px;
-                padding: 2px 10px;
-                font-size: 11.5px;
-                background: rgba(25, 36, 51, 0.92);
-                color: #e6edf5;
-                border: 1px solid #35485e;
-                border-radius: 6px;
+            .hud-mini-btn {{
+                min-height: 20px;
+                min-width: 22px;
+                padding: 0 5px;
+                font-size: 12px;
+                font-weight: 700;
+                background: rgba(26, 38, 54, 0.85);
+                color: #d9e4f1;
+                border: 1px solid rgba(90, 114, 140, 0.55);
+                border-radius: 5px;
+            }}
+            .hud-mini-btn:hover {{
+                background: rgba(45, 63, 86, 0.95);
+                border-color: rgba(217, 164, 75, 0.85);
+                color: #f8e5b8;
             }}
         """
         if self.hud_css is not None:
             self.hud_css.load_from_data(css_text.encode("utf-8"))
+        GLib.idle_add(self._sync_hud_input_region)
 
     def _on_hud_pref_changed(self, *_):
         if self._updating_hud_controls or not hasattr(self, "hud_enabled_switch"):
@@ -1141,6 +1176,8 @@ class Companion(Gtk.Application):
         pos_idx = self.hud_position_combo.get_selected()
         self.hud_prefs["enabled"] = self.hud_enabled_switch.get_active()
         self.hud_prefs["compact"] = self.hud_compact_switch.get_active()
+        if hasattr(self, "hud_interactive_switch"):
+            self.hud_prefs["interactive_controls"] = self.hud_interactive_switch.get_active()
         if 0 <= pos_idx < len(pos_keys):
             self.hud_prefs["position"] = pos_keys[pos_idx]
         opacity_pct = round(self.hud_opacity_scale.get_value())
@@ -1213,6 +1250,11 @@ class Companion(Gtk.Application):
                     self.status.set_text(f"Entered {zone} · advanced to Act {matched[0] + 1}, Step {matched[1] + 1}")
         return GLib.SOURCE_CONTINUE
 
+    def _sync_hud_input_region(self):
+        if self.hud is not None and self.hud.get_visible() and self.hud.get_surface() is not None:
+            self.apply_input_region(self.clickable)
+        return GLib.SOURCE_REMOVE
+
     def apply_input_region(self, clickable: bool) -> bool:
         if not self.layer_ready or self.hud is None:
             return False
@@ -1222,9 +1264,20 @@ class Companion(Gtk.Application):
         try:
             if clickable:
                 surface.set_input_region(None)  # Entire mapped HUD accepts pointer input.
-            else:
-                import cairo
-                surface.set_input_region(cairo.Region())
+                return True
+            import cairo
+            if self.hud_prefs.get("interactive_controls", True) and hasattr(self, "hud_mini_controls"):
+                ok, rect = self.hud_mini_controls.compute_bounds(self.hud)
+                if ok and rect.size.width > 1 and rect.size.height > 1:
+                    region = cairo.Region(cairo.RectangleInt(
+                        max(0, int(rect.origin.x) - 2),
+                        max(0, int(rect.origin.y) - 2),
+                        int(rect.size.width) + 4,
+                        int(rect.size.height) + 4,
+                    ))
+                    surface.set_input_region(region)
+                    return True
+            surface.set_input_region(cairo.Region())
             return True
         except Exception as exc:
             print(f"Could not update HUD pointer region: {exc}", file=sys.stderr)
@@ -1983,6 +2036,8 @@ class Companion(Gtk.Application):
         self.hud.set_visible(True)
         if self.hud.get_surface() is not None and not self.apply_input_region(self.clickable):
             self.hide_hud()
+            return GLib.SOURCE_REMOVE
+        GLib.idle_add(self._sync_hud_input_region)
         return GLib.SOURCE_REMOVE
 
     def hide_hud(self, clear_output: bool = False):
