@@ -11,21 +11,25 @@ A native Linux/Wayland Path of Exile 1 build desk, passive skill tree viewer, an
 ## Features
 
 ### Build Desk & Path of Building Import
+- Modern integrated GTK 4 headerbar with segmented pill navigation (`Ctrl+1–5`), global **+ Import** dialog with 1-click **Paste from Clipboard** (`Ctrl+I`), and a live **HUD** preview pill.
 - Import public `pobb.in` share links (HTTPS `/ID/raw` and `/u/user/ID/raw`), PoB Community share codes, or raw XML exports (offline).
-- Renders PoB `^0`–`^9` and `^xRRGGBB` note color escapes natively without markup execution.
-- Inspect **Overview**, **Passive tree**, **Loadouts** (gear slots with rarity coloring, gem groups, linked loadouts), and **Campaign** from one desktop window.
+- Hero build dashboard with stat pills, full-height **Build notes** with inline search and native PoB `^0`–`^9` / `^xRRGGBB` color rendering.
+- **Visual Loadouts:** PoE-styled rarity item cards (Unique/Rare/Magic/Normal), visual **Gem Link Cards** with color-coded socket dots and link bars, linked loadout switching, and instant gear/gem filtering.
+- **Vendor & Stash Regex Helper (`Regex` tab):** one-click copyable PoE search regex presets (3-links, movement speed boots, caster wands, life + resists, safe maps) plus custom saved presets in `~/.config/poe-companion/regexes.json`.
 - Keeps saved builds and campaign progress locally in `~/.local/share/poe-companion/state.json`.
 
 ### Interactive Passive Skill Tree
 - Exact version-pinned GGG passive tree data (`3_29` / `3.29.1` and `3_30` / `3.30.0`) with official artwork atlases cached under `~/.cache/wraeclast-companion/passive-tree/`.
+- **Passive Tree Diff Mode:** compare any two tree variants (e.g., *Act 3* → *Act 6* → *Maps*) to highlight newly added nodes in emerald green (`+N`) and respecced nodes in crimson (`−M`) on the canvas and tooltips.
 - Smooth `< 1 ms` interactive pan & cursor-anchored scroll zoom with HiDPI rendering, node/stat search, hover tooltips, **Fit build** / **Fit all**, and keyboard shortcuts (`+` / `-` / `0` / `Esc`).
 - Hides unselected sibling ascendancies by default (with an **All asc.** toggle) to eliminate GGG's overlapping ascendancy portraits.
 - *Read-only:* cluster-jewel, tattoo, and override transformations are not calculated.
 
-### In-Game Leveling HUD (Acts 1–10)
+### In-Game Leveling HUD & Run Timer (Acts 1–10)
+- **Interactive Act Checklist & Live Run Timer:** clickable step timeline on the Campaign tab with Start/Pause/Reset timer, automatic **Act 1–10 splits**, and an optional timer pill on the in-game HUD.
 - **Compact by default:** slim bar with act/step badge, progress bar, step title, and one-line cue; expands on demand for full route details, beginner tips, and build/gem reminders.
-- **Automatic `Client.txt` tracking:** discovers Steam/Proton PoE logs (including secondary Steam library drives via `libraryfolders.vdf`), tails `You have entered ...` lines incrementally, and advances matching campaign steps automatically.
-- **Live HUD settings & Preview (Campaign tab):** configure enable/disable, compact bar, clickable mini-buttons, screen position (`Top center`, `Top right`, `Top left`, `Bottom center`, `Bottom left`), opacity, `Client.txt` auto-tracking, and **Preview HUD** (persisted in `~/.config/poe-companion/hud.json`).
+- **Automatic `Client.txt` tracking:** discovers Steam/Proton PoE logs (including secondary Steam library drives via `libraryfolders.vdf`), tails `You have entered ...` lines incrementally, and advances matching campaign steps and act splits automatically.
+- **Live HUD settings & Preview:** configure enable/disable, compact bar, clickable mini-buttons, HUD timer, screen position (`Top center`, `Top right`, `Top left`, `Bottom center`, `Bottom left`), opacity, `Client.txt` auto-tracking, and **Preview HUD** (persisted in `~/.config/poe-companion/hud.json`).
 - **Optional CLI hotkeys** (instant local socket dispatch): `--next-step`, `--prev-step`, `--toggle-compact`, `--toggle-hud`, and `--toggle-clickable`.
 
 ---

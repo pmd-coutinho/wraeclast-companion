@@ -175,6 +175,9 @@ class PassiveTreeCanvas(Gtk.DrawingArea):
         self.show_all_ascendancies = False
         self._search_query = ""
         self._search_matches: set[str] = set()
+        self._diff_added: set[str] = set()
+        self._diff_removed: set[str] = set()
+        self._diff_label = ""
         self._pending_fit_mode = None
         self.art_errors = []
         self.art_warnings = []
@@ -238,6 +241,13 @@ class PassiveTreeCanvas(Gtk.DrawingArea):
             self.hovered_node = None
         if self._search_query:
             self._search_matches = set(search_matching_nodes(self.graph, self._search_query, self._visible_node_ids))
+        self._render_cache_key = None
+        self.queue_draw()
+
+    def set_diff_nodes(self, added: set[str] | None, removed: set[str] | None, label: str = ""):
+        self._diff_added = set(added or ())
+        self._diff_removed = set(removed or ())
+        self._diff_label = label or ""
         self._render_cache_key = None
         self.queue_draw()
 
@@ -568,7 +578,8 @@ class PassiveTreeCanvas(Gtk.DrawingArea):
         scale_factor = max(1, self.get_scale_factor())
         base_key = (id(self.graph), width, height, scale_factor,
                     len(self._atlases), tuple(self.art_errors), self._search_query,
-                    self.show_all_ascendancies)
+                    self.show_all_ascendancies, len(self._diff_added), len(self._diff_removed),
+                    self._diff_label)
         interactive = self._dragging or self._zoom_settle_id is not None
 
         if interactive and self._can_blit_interactive_cache(base_key, width, height):
@@ -756,6 +767,43 @@ class PassiveTreeCanvas(Gtk.DrawingArea):
                         frame_key = "PSSkillFrameActive" if node["allocated"] else "PSSkillFrame"
                 self._sprite(cr, frame_family, frame_key, x, y, scale, width, height, alpha=alpha)
 
+        # Diff highlights: emerald green for newly added nodes, crimson for respecced/removed nodes.
+        if self._diff_added or self._diff_removed:
+            for node_id in self._diff_added:
+                node = nodes.get(node_id)
+                if not node or node_id not in self._visible_node_ids:
+                    continue
+                x, y = self._screen(node, transform)
+                if x < -40 or x > width + 40 or y < -40 or y > height + 40:
+                    continue
+                r = max(9.5, node_world_radius(node) * scale * 1.24)
+                cr.set_source_rgba(0.05, 0.16, 0.09, 0.72)
+                cr.set_line_width(4.8)
+                cr.arc(x, y, r, 0, TWO_PI)
+                cr.stroke()
+                cr.set_source_rgba(0.24, 0.87, 0.50, 0.96)
+                cr.set_line_width(2.4)
+                cr.arc(x, y, r, 0, TWO_PI)
+                cr.stroke()
+            for node_id in self._diff_removed:
+                node = nodes.get(node_id)
+                if not node or node_id not in self._visible_node_ids:
+                    continue
+                x, y = self._screen(node, transform)
+                if x < -40 or x > width + 40 or y < -40 or y > height + 40:
+                    continue
+                r = max(9.5, node_world_radius(node) * scale * 1.24)
+                cr.set_source_rgba(0.20, 0.05, 0.06, 0.72)
+                cr.set_line_width(4.8)
+                cr.arc(x, y, r, 0, TWO_PI)
+                cr.stroke()
+                cr.set_source_rgba(0.95, 0.35, 0.37, 0.95)
+                cr.set_line_width(2.3)
+                cr.set_dash([5.0, 3.0])
+                cr.arc(x, y, r, 0, TWO_PI)
+                cr.stroke()
+                cr.set_dash([])
+
         # Search highlights (drawn on base cache so they stay crisp during hover).
         if self._search_matches:
             for node_id in self._search_matches:
@@ -823,6 +871,12 @@ class PassiveTreeCanvas(Gtk.DrawingArea):
         # Build header + badge + body lines.
         title_text = node.get("name", "Passive")
         flags = ["Allocated" if node.get("allocated") else "Unallocated"]
+        node_id = str(node.get("id", ""))
+        diff_label = getattr(self, "_diff_label", "")
+        if node_id in getattr(self, "_diff_added", ()):
+            flags.append(f"+ Added vs {diff_label}" if diff_label else "+ Added")
+        elif node_id in getattr(self, "_diff_removed", ()):
+            flags.append(f"− Respecced vs {diff_label}" if diff_label else "− Respecced")
         for key, label in (("keystone", "Keystone"), ("notable", "Notable"),
                            ("mastery", "Mastery"), ("jewel", "Jewel Socket"),
                            ("ascendancy", "Ascendancy")):

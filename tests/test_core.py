@@ -721,13 +721,63 @@ class ClientLogAndHudTests(unittest.TestCase):
     def test_hud_prefs_round_trip_and_compact_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "hud.json"
-            prefs = {**app_module.DEFAULT_HUD_PREFS, "position": "top-right", "opacity": 0.75, "compact": False, "interactive_controls": False}
+            prefs = {**app_module.DEFAULT_HUD_PREFS, "position": "top-right", "opacity": 0.75, "compact": False,
+                     "interactive_controls": False, "show_timer": True}
             app_module.save_hud_prefs(prefs, path)
             loaded = app_module.load_hud_prefs(path)
             self.assertEqual(loaded["position"], "top-right")
             self.assertAlmostEqual(loaded["opacity"], 0.75)
             self.assertFalse(loaded["compact"])
             self.assertFalse(loaded["interactive_controls"])
+            self.assertTrue(loaded["show_timer"])
+
+
+class ToolsAndQoLTests(unittest.TestCase):
+    def test_parse_item_card_and_gem_colors(self):
+        from poe_companion.tools import gem_socket_color, is_support_gem, parse_item_card
+        card = parse_item_card(
+            "Rarity: UNIQUE\nGoldrim\nLeather Cap\n--------\nQuality: +20%\nEvasion: 50\n--------\n+35% to all Elemental Resistances\n"
+        )
+        self.assertEqual(card["rarity"], "unique")
+        self.assertEqual(card["name"], "Goldrim")
+        self.assertEqual(card["base"], "Leather Cap")
+        self.assertIn("Quality: +20%", card["meta"])
+        self.assertEqual(card["sections"], [["+35% to all Elemental Resistances"]])
+        self.assertEqual(gem_socket_color("Determination (Lv 20)"), "red")
+        self.assertEqual(gem_socket_color("Grace (Lv 20)"), "green")
+        self.assertEqual(gem_socket_color("Frostblink (Lv 20)"), "blue")
+        self.assertEqual(gem_socket_color("Portal (Lv 1)"), "white")
+        self.assertTrue(is_support_gem("Lifetap Support (Lv 20)"))
+        self.assertFalse(is_support_gem("Righteous Fire (Lv 20)"))
+
+    def test_tree_diff_run_timer_and_regex_persistence(self):
+        from poe_companion.tools import RunTimer, compute_tree_diff, load_regex_presets, save_custom_regexes
+        added, removed = compute_tree_diff([1, 2, 3], [2, 3, 4, 5])
+        self.assertEqual(added, {"1"})
+        self.assertEqual(removed, {"4", "5"})
+
+        now = [100.0]
+        timer = RunTimer(clock=lambda: now[0])
+        timer.start()
+        now[0] = 165.0
+        timer.record_act_transition(0, 1)
+        self.assertEqual(timer.formatted(), "01:05")
+        self.assertAlmostEqual(timer.splits[1], 65.0)
+        timer.pause()
+        now[0] = 200.0
+        self.assertAlmostEqual(timer.elapsed(), 65.0)
+        timer.reset()
+        self.assertEqual(timer.splits, {})
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "regexes.json"
+            presets = load_regex_presets(path)
+            builtin_count = len(presets)
+            presets.append({"id": "c1", "category": "Custom", "title": "My Boots", "regex": "nne|rint", "note": "fast", "builtin": False})
+            save_custom_regexes(presets, path)
+            reloaded = load_regex_presets(path)
+            self.assertEqual(len(reloaded), builtin_count + 1)
+            self.assertEqual(reloaded[-1]["title"], "My Boots")
         self.assertEqual(app_module.compact_step_summary("First sentence. Second sentence."), "First sentence.")
 
 

@@ -44,6 +44,8 @@ from .tree_art import load_tree_atlases
 from .policy import advance, is_game_focus, toggle_clickable
 from .tree_canvas import PassiveTreeCanvas
 from .client_log import ClientLogTailer, discover_client_log, match_campaign_step
+from .tools import (RunTimer, compute_tree_diff, format_duration, gem_socket_color,
+                    is_support_gem, load_regex_presets, parse_item_card, save_custom_regexes)
 
 APP_ID = "org.poecompanion.Companion"
 DATA = Path.home() / ".local/share/poe-companion"
@@ -66,6 +68,7 @@ DEFAULT_HUD_PREFS = {
     "compact": True,
     "opacity": 0.88,
     "interactive_controls": True,
+    "show_timer": False,
     "auto_track_client_log": True,
     "client_log_path": "",
 }
@@ -84,6 +87,8 @@ def load_hud_prefs(path: Path = HUD_PREFS_PATH) -> dict:
         prefs["opacity"] = min(0.96, max(0.45, float(raw["opacity"])))
     if isinstance(raw.get("interactive_controls"), bool):
         prefs["interactive_controls"] = raw["interactive_controls"]
+    if isinstance(raw.get("show_timer"), bool):
+        prefs["show_timer"] = raw["show_timer"]
     if isinstance(raw.get("auto_track_client_log"), bool):
         prefs["auto_track_client_log"] = raw["auto_track_client_log"]
     if isinstance(raw.get("client_log_path"), str) and len(raw["client_log_path"]) <= 1024:
@@ -320,16 +325,28 @@ class Companion(Gtk.Application):
         self.import_request_id = 0
         self.import_pending = False
         self._updating_tree_combo = False
+        self._updating_diff_combo = False
         self._updating_item_combo = False
         self._updating_skill_combo = False
         self._updating_loadout_combo = False
+        self._updating_campaign_list = False
         self.tree_load_id = 0
         self.tree_graph = None
         self.tree_search_matches = []
         self.tree_search_index = -1
+        self.tree_diff_specs = []
         self.note_tags = {}
         self.item_tags = {}
         self.skill_tags = {}
+        self.run_timer = RunTimer()
+        self.regex_presets = load_regex_presets()
+        self.regex_category_filter = "All"
+        self._nav_buttons = {}
+        self._notes_raw_text = ""
+        self._notes_search_offset = 0
+        self.import_dialog = None
+        self.import_status_label = None
+        self._loadout_filter_query = ""
 
     def do_activate(self):
         if self.planner is None:
@@ -355,293 +372,685 @@ class Companion(Gtk.Application):
 
     def build_ui(self):
         self.planner = Gtk.ApplicationWindow(application=self, title="Wraeclast Companion")
-        self.planner.set_default_size(1160, 780)
-        self.planner.set_size_request(680, 520)
+        self.planner.set_default_size(1240, 820)
+        self.planner.set_size_request(760, 560)
         self.planner.add_css_class("planner-window")
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.planner.set_child(root)
 
-        header = Gtk.Box(spacing=14)
-        header.add_css_class("app-header")
-        brand = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        title = Gtk.Label(label="Wraeclast Companion")
-        title.add_css_class("app-title"); title.set_xalign(0); brand.append(title)
-        intro = Gtk.Label(label="Build desk · Path of Exile 1")
-        intro.set_xalign(0); intro.add_css_class("app-subtitle"); brand.append(intro)
-        header.append(brand)
-        header.append(Gtk.Box(hexpand=True))
-        build_label = Gtk.Label(label="ACTIVE BUILD")
-        build_label.add_css_class("section-kicker"); header.append(build_label)
+        # Modern integrated client-side HeaderBar
+        headerbar = Gtk.HeaderBar()
+        headerbar.add_css_class("app-headerbar")
+        headerbar.set_show_title_buttons(True)
+
+        left_box = Gtk.Box(spacing=8)
+        brand_title = Gtk.Label(label="◆ Wraeclast")
+        brand_title.add_css_class("brand-mark")
+        left_box.append(brand_title)
+
         builds = ["Campaign only"] + [b.get("name") or f"Build {i + 1}" for i, b in enumerate(self.store.data["builds"])]
         self.build_combo = Gtk.DropDown.new_from_strings(builds)
         self.build_combo.set_selected(self.store.data["selected_build"] + 1)
-        self.build_combo.set_size_request(210, -1)
+        self.build_combo.set_size_request(180, -1)
+        self.build_combo.set_tooltip_text("Active build")
         self.build_combo.connect("notify::selected", self.change_build)
-        header.append(self.build_combo)
-        self.remove_build_button = Gtk.Button(label="Remove")
+        left_box.append(self.build_combo)
+
+        self.header_import_button = Gtk.Button(label="+ Import")
+        self.header_import_button.add_css_class("suggested-action")
+        self.header_import_button.set_tooltip_text("Import a PoB link, share code, or XML (Ctrl+I)")
+        self.header_import_button.connect("clicked", lambda *_: self.open_import_dialog())
+        left_box.append(self.header_import_button)
+
+        self.remove_build_button = Gtk.Button(label="✕")
         self.remove_build_button.add_css_class("destructive-subtle")
+        self.remove_build_button.add_css_class("compact-btn")
         self.remove_build_button.set_tooltip_text("Remove the currently selected saved build")
         self.remove_build_button.connect("clicked", self.remove_current_build)
-        header.append(self.remove_build_button)
-        root.append(header)
+        left_box.append(self.remove_build_button)
+        headerbar.pack_start(left_box)
 
-        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0, hexpand=True, vexpand=True)
+        # Center segmented pill navigation
+        nav_box = Gtk.Box(spacing=3)
+        nav_box.add_css_class("nav-pill-bar")
+        nav_items = (
+            ("overview", "Overview", "Ctrl+1"),
+            ("tree", "Tree", "Ctrl+2"),
+            ("loadouts", "Loadouts", "Ctrl+3"),
+            ("campaign", "Campaign", "Ctrl+4"),
+            ("regex", "Regex", "Ctrl+5"),
+        )
+        for page_id, label, shortcut in nav_items:
+            btn = Gtk.ToggleButton(label=label)
+            btn.add_css_class("nav-pill-btn")
+            btn.set_tooltip_text(f"{label} ({shortcut})")
+            btn.connect("clicked", self._on_nav_pill_clicked, page_id)
+            nav_box.append(btn)
+            self._nav_buttons[page_id] = btn
+        headerbar.set_title_widget(nav_box)
+
+        # Right side: global HUD preview/status pill
+        self.header_hud_button = Gtk.ToggleButton(label="● HUD")
+        self.header_hud_button.add_css_class("hud-status-pill")
+        self.header_hud_button.set_tooltip_text("Toggle in-game HUD preview")
+        self.header_hud_button.connect("toggled", self._on_hud_preview_toggled)
+        headerbar.pack_end(self.header_hud_button)
+
+        self.planner.set_titlebar(headerbar)
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.planner.set_child(root)
+
         self.page_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE,
-                                    transition_duration=120, hexpand=True, vexpand=True)
+                                    transition_duration=140, hexpand=True, vexpand=True)
         self.page_stack.set_hhomogeneous(False)
-        sidebar = Gtk.StackSidebar(stack=self.page_stack)
-        sidebar.add_css_class("app-sidebar")
-        sidebar.set_size_request(156, -1)
-        body.append(sidebar)
-        body.append(self.page_stack)
-        root.append(body)
+        root.append(self.page_stack)
 
         self._build_overview_page()
         self._build_tree_page()
         self._build_loadouts_page()
         self._build_campaign_page()
+        self._build_regex_page()
+        self._select_page("overview")
 
-        footer = Gtk.Box(spacing=10)
+        # Global window keyboard shortcuts (Ctrl+1..5, Ctrl+I)
+        key_ctrl = Gtk.EventControllerKey()
+        key_ctrl.connect("key-pressed", self._on_window_key_pressed)
+        self.planner.add_controller(key_ctrl)
+
+        footer = Gtk.Box(spacing=12)
         footer.add_css_class("app-footer")
         self.status = Gtk.Label(label="No build needed: the campaign guide works on its own.")
-        self.status.set_xalign(0); self.status.set_wrap(True); self.status.add_css_class("footer-status")
+        self.status.set_xalign(0); self.status.set_hexpand(True); self.status.set_ellipsize(Pango.EllipsizeMode.END)
+        self.status.add_css_class("footer-status")
         footer.append(self.status)
+        self.footer_shortcuts = Gtk.Label(label="Ctrl+1–5 tabs · Ctrl+I import")
+        self.footer_shortcuts.add_css_class("footer-hint")
+        footer.append(self.footer_shortcuts)
         root.append(footer)
 
         css = Gtk.CssProvider()
         css.load_from_data(b"""
-            .planner-window { background: #0b1017; color: #e6edf5; }
-            .planner-window headerbar { background: #101722; color: #e6edf5; border-bottom: 1px solid #1e2a38; }
-
-            .app-header {
-                background: #101722;
-                border-bottom: 1px solid #1f2b3a;
-                padding: 12px 18px;
+            .planner-window { background: #090d14; color: #e6edf5; }
+            .app-headerbar {
+                background: #0e141f;
+                color: #e6edf5;
+                border-bottom: 1px solid #1d2a3a;
+                padding: 4px 10px;
+                min-height: 46px;
             }
-            .app-title { font-size: 18px; font-weight: 700; color: #f3e4c3; letter-spacing: 0.2px; }
-            .app-subtitle { font-size: 12px; color: #7e90a4; }
-            .section-kicker { font-size: 10.5px; font-weight: 700; color: #7e90a4; letter-spacing: 0.8px; }
-
-            .app-sidebar {
-                background: #0e141e;
-                border-right: 1px solid #1d2938;
-                padding: 10px 8px;
+            .brand-mark {
+                font-size: 14px;
+                font-weight: 800;
+                color: #e5b864;
+                letter-spacing: 0.4px;
+                margin-right: 4px;
             }
-            .app-sidebar list { background: transparent; }
-            .app-sidebar row {
+            .nav-pill-bar {
+                background: #090e16;
+                border: 1px solid #1d2a3b;
+                border-radius: 10px;
+                padding: 3px;
+            }
+            .planner-window button.nav-pill-btn {
                 background: transparent;
-                color: #a9b8c9;
-                border-radius: 8px;
-                margin: 2px 0;
-                padding: 9px 12px;
-                font-weight: 500;
+                color: #93a6bc;
+                border: 1px solid transparent;
+                border-radius: 7px;
+                min-height: 28px;
+                padding: 3px 13px;
+                font-size: 12.5px;
+                font-weight: 600;
             }
-            .app-sidebar row:hover { background: #162130; color: #e6edf5; }
-            .app-sidebar row:selected {
-                background: #233042;
-                color: #f3ca78;
+            .planner-window button.nav-pill-btn:hover {
+                background: #141e2c;
+                color: #e6edf5;
+            }
+            .planner-window button.nav-pill-btn:checked {
+                background: #1e2c3f;
+                color: #f4cc7b;
+                border-color: #364c68;
                 font-weight: 700;
-                border-left: 3px solid #d9a44b;
+            }
+            .planner-window button.hud-status-pill {
+                background: #121b27;
+                color: #8ea3b8;
+                border: 1px solid #243447;
+                border-radius: 16px;
+                min-height: 28px;
+                padding: 2px 11px;
+                font-size: 11.5px;
+                font-weight: 700;
+            }
+            .planner-window button.hud-status-pill:hover {
+                border-color: #46607d;
+                color: #e6edf5;
+            }
+            .planner-window button.hud-status-pill:checked {
+                background: #1c2f24;
+                color: #5ee396;
+                border-color: #2f6c48;
             }
 
+            .section-kicker { font-size: 10.5px; font-weight: 700; color: #7e92a8; letter-spacing: 0.9px; }
             .app-footer {
-                background: #0e141e;
-                border-top: 1px solid #1d2938;
-                padding: 8px 18px;
+                background: #0c121b;
+                border-top: 1px solid #1a2636;
+                padding: 6px 16px;
             }
-            .footer-status { font-size: 12px; color: #8b9db1; }
+            .footer-status { font-size: 12px; color: #8da1b7; }
+            .footer-hint { font-size: 11px; color: #5b6d82; }
 
-            .page-container { padding: 16px 18px; }
+            .page-container { padding: 16px 20px; }
             .planner-card {
-                background: #131c27;
-                border: 1px solid #243345;
+                background: #111824;
+                border: 1px solid #202e40;
                 border-radius: 12px;
                 padding: 16px;
             }
+            .hero-card {
+                background: linear-gradient(135deg, #151f2e 0%, #101723 100%);
+                border: 1px solid #293a50;
+                border-radius: 14px;
+                padding: 18px 20px;
+            }
             .tree-canvas-frame {
-                background: #080c12;
-                border: 1px solid #243345;
+                background: #070b10;
+                border: 1px solid #202e40;
                 border-radius: 12px;
             }
             .tip-callout {
-                background: #172130;
-                border: 1px solid #2d3f56;
-                border-left: 3px solid #d9a44b;
+                background: #151e2c;
+                border: 1px solid #2a3b52;
+                border-left: 3px solid #dca74c;
                 border-radius: 8px;
                 padding: 12px 14px;
             }
             .context-card {
-                background: #111924;
-                border: 1px solid #223042;
+                background: #0e1520;
+                border: 1px solid #1e2c3d;
                 border-radius: 10px;
-                padding: 12px 14px;
+                padding: 11px 14px;
             }
-            .planner-subtle { color: #94a6ba; }
+            .planner-subtle { color: #8ea1b7; }
             .planner-accent { color: #ecc06c; }
             .node-stat-text { color: #8eb7ff; font-size: 13px; }
-            .node-badge {
-                background: #1d2a3a;
-                color: #c7d5e5;
-                border-radius: 6px;
-                padding: 3px 8px;
-                font-size: 11px;
+            .stat-pill {
+                background: #182334;
+                color: #d6e2f0;
+                border: 1px solid #28384e;
+                border-radius: 16px;
+                padding: 4px 11px;
+                font-size: 12px;
                 font-weight: 600;
             }
-            .node-badge-gold {
-                background: #332815;
-                color: #f3ca78;
-                border: 1px solid #6b5023;
+            .stat-pill-gold {
+                background: #2b2213;
+                color: #f4cc7b;
+                border: 1px solid #63491f;
+            }
+            .diff-pill-add {
+                background: #132c1e;
+                color: #4ee28b;
+                border: 1px solid #255a3b;
+                border-radius: 12px;
+                padding: 3px 9px;
+                font-size: 11.5px;
+                font-weight: 700;
+            }
+            .diff-pill-rem {
+                background: #2f1519;
+                color: #f57378;
+                border: 1px solid #622830;
+                border-radius: 12px;
+                padding: 3px 9px;
+                font-size: 11.5px;
+                font-weight: 700;
             }
             .zoom-readout {
                 font-size: 12px;
-                font-weight: 600;
+                font-weight: 700;
                 color: #a9b8c9;
                 min-width: 44px;
             }
+            .timer-readout {
+                font-family: monospace;
+                font-size: 15px;
+                font-weight: 700;
+                color: #f4cc7b;
+                background: #0d141e;
+                border: 1px solid #253447;
+                border-radius: 8px;
+                padding: 4px 10px;
+            }
+            .split-chip {
+                background: #152030;
+                color: #c8d6e6;
+                border: 1px solid #25364c;
+                border-radius: 7px;
+                padding: 3px 8px;
+                font-size: 11px;
+                font-family: monospace;
+            }
             .toolbar-bar {
-                background: #111924;
-                border: 1px solid #223042;
-                border-radius: 10px;
-                padding: 8px 10px;
+                background: #0f1622;
+                border: 1px solid #1e2c3e;
+                border-radius: 11px;
+                padding: 8px 11px;
             }
 
+            /* PoE-styled Item Card */
+            .poe-item-card {
+                background: #0b1018;
+                border: 1px solid #27364a;
+                border-radius: 10px;
+                padding: 0;
+            }
+            .poe-item-header-unique {
+                background: linear-gradient(180deg, #3c1f0e 0%, #24130a 100%);
+                color: #e88a3c;
+                border-bottom: 1px solid #75411c;
+                border-radius: 9px 9px 0 0;
+                padding: 10px 14px;
+            }
+            .poe-item-header-rare {
+                background: linear-gradient(180deg, #373012 0%, #221e0d 100%);
+                color: #f6dc74;
+                border-bottom: 1px solid #6d5f24;
+                border-radius: 9px 9px 0 0;
+                padding: 10px 14px;
+            }
+            .poe-item-header-magic {
+                background: linear-gradient(180deg, #162244 0%, #10172b 100%);
+                color: #88a4ff;
+                border-bottom: 1px solid #30498b;
+                border-radius: 9px 9px 0 0;
+                padding: 10px 14px;
+            }
+            .poe-item-header-normal {
+                background: linear-gradient(180deg, #1e2633 0%, #151b24 100%);
+                color: #dce4ef;
+                border-bottom: 1px solid #354357;
+                border-radius: 9px 9px 0 0;
+                padding: 10px 14px;
+            }
+            .poe-item-name { font-size: 14px; font-weight: 700; }
+            .poe-item-base { font-size: 12px; opacity: 0.88; }
+            .poe-item-body { padding: 10px 14px; }
+            .poe-item-meta { color: #8c9fb5; font-size: 11.5px; }
+            .poe-item-mod { color: #8fb8ff; font-size: 12.5px; }
+            .poe-item-sep { background: #1e2b3c; min-height: 1px; margin: 4px 0; }
+
+            /* Visual Gem Link Cards */
+            .gem-group-card {
+                background: #0e1520;
+                border: 1px solid #202e40;
+                border-radius: 10px;
+                padding: 11px 13px;
+            }
+            .gem-group-title { font-size: 12.5px; font-weight: 700; color: #ecc06c; }
+            .socket-dot {
+                min-width: 10px;
+                min-height: 10px;
+                border-radius: 99px;
+            }
+            .socket-red { background: #e35656; border: 1px solid #ff9494; }
+            .socket-green { background: #47d478; border: 1px solid #96f5b7; }
+            .socket-blue { background: #5a9bff; border: 1px solid #a8ccff; }
+            .socket-white { background: #e8eef6; border: 1px solid #ffffff; }
+            .socket-link-bar {
+                background: #c79a4a;
+                min-width: 7px;
+                min-height: 2px;
+                border-radius: 2px;
+            }
+            .gem-row-active { font-size: 13px; font-weight: 600; color: #eef3f9; }
+            .gem-row-support { font-size: 12.5px; color: #a7b9ce; }
+
+            /* Regex cards */
+            .regex-card {
+                background: #101824;
+                border: 1px solid #213043;
+                border-radius: 11px;
+                padding: 12px 14px;
+            }
+            .regex-code {
+                font-family: monospace;
+                font-size: 12px;
+                color: #82d9ff;
+                background: #090e15;
+                border: 1px solid #1b2838;
+                border-radius: 7px;
+                padding: 6px 10px;
+            }
+
+            /* Campaign checklist */
+            .campaign-step-done { color: #679c7e; }
+            .campaign-step-active { color: #f6d388; font-weight: 700; }
+            .campaign-step-pending { color: #a8b9cc; }
+
             .planner-window button {
-                min-height: 32px;
-                background: #192433;
+                min-height: 31px;
+                background: #172231;
                 color: #e6edf5;
-                border: 1px solid #2c3c50;
+                border: 1px solid #29394d;
                 border-radius: 8px;
                 padding: 4px 12px;
             }
-            .planner-window button:hover { background: #223144; border-color: #3d526c; }
-            .planner-window button:active { background: #16202d; }
+            .planner-window button:hover { background: #202f43; border-color: #3d5470; }
+            .planner-window button:active { background: #141e2b; }
             .planner-window button:disabled { opacity: 0.45; }
-            .planner-window button.compact-btn { min-height: 30px; min-width: 30px; padding: 2px 8px; }
+            .planner-window button.compact-btn { min-height: 29px; min-width: 29px; padding: 2px 8px; }
             .planner-window button.suggested-action {
-                background: #c79040;
-                color: #10141a;
-                border-color: #dca655;
+                background: #cb9442;
+                color: #0f1319;
+                border-color: #dfa958;
                 font-weight: 700;
             }
-            .planner-window button.suggested-action:hover { background: #d69f4e; }
+            .planner-window button.suggested-action:hover { background: #daa250; }
             .planner-window button.destructive-subtle {
-                background: #1b1c24;
+                background: #191a23;
                 color: #d99b9b;
-                border-color: #3c2930;
+                border-color: #3a272f;
             }
             .planner-window button.destructive-subtle:hover {
-                background: #341d22;
+                background: #351d23;
                 color: #f7c5c5;
                 border-color: #6b333c;
             }
 
-            .planner-window dropdown button { background: #172231; color: #e6edf5; border-color: #2c3c50; }
+            .planner-window switch {
+                background: #1b2738;
+                border: 1px solid #2d3e54;
+                border-radius: 14px;
+            }
+            .planner-window switch:checked {
+                background: #c79040;
+                border-color: #dca655;
+            }
+            .planner-window switch slider {
+                background: #e9eff7;
+                border-radius: 12px;
+            }
+            .planner-window scale trough {
+                background: #1a2636;
+                border-radius: 6px;
+                min-height: 6px;
+            }
+            .planner-window scale highlight {
+                background: #d49e48;
+                border-radius: 6px;
+            }
+            .planner-window scale slider {
+                background: #f4d593;
+                border: 1px solid #9e722b;
+                border-radius: 99px;
+                min-width: 15px;
+                min-height: 15px;
+            }
+            .planner-window dropdown button { background: #15202e; color: #e6edf5; border-color: #29394d; }
             .planner-window entry, .planner-window searchentry {
-                background: #0f1620;
+                background: #0c121b;
                 color: #e6edf5;
-                border: 1px solid #29384a;
+                border: 1px solid #263648;
                 border-radius: 8px;
-                min-height: 32px;
+                min-height: 31px;
             }
             .planner-window entry:focus-within, .planner-window searchentry:focus-within {
-                border-color: #c79040;
+                border-color: #d49e48;
             }
-            .planner-window list { background: #101722; color: #e6edf5; }
+            .planner-window list { background: #0e1520; color: #e6edf5; }
             .planner-window listbox.boxed-list {
-                background: #0f1620;
-                border: 1px solid #223042;
-                border-radius: 8px;
+                background: #0c121b;
+                border: 1px solid #1f2d3f;
+                border-radius: 10px;
             }
             .planner-window listbox.boxed-list row {
                 background: transparent;
                 color: #dbe5f0;
-                border-bottom: 1px solid #1a2533;
+                border-bottom: 1px solid #172130;
             }
-            .planner-window listbox.boxed-list row:hover { background: #182332; }
+            .planner-window listbox.boxed-list row:hover { background: #162131; }
             .planner-window listbox.boxed-list row:selected {
-                background: #2f2616;
+                background: #2b2315;
                 color: #f8dfa6;
             }
             .planner-window textview, .planner-window textview text {
-                background: #0f1620;
+                background: #0c121b;
                 color: #e6edf5;
             }
             .planner-window paned > separator {
-                background: #1f2b3a;
+                background: #1c2838;
                 min-width: 5px;
             }
             .planner-window progressbar trough {
-                background: #1b2635;
+                background: #192434;
                 border-radius: 6px;
                 min-height: 7px;
             }
             .planner-window progressbar progress {
-                background: #d49e48;
+                background: linear-gradient(90deg, #c79040, #ecc06c);
                 border-radius: 6px;
                 min-height: 7px;
+            }
+            .planner-window expander title {
+                padding: 4px 2px;
+                font-weight: 700;
+                color: #d7e2f0;
             }
         """)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         self.planner_css = css
         self.build_hud()
+        # Tick run timer display once per second.
+        GLib.timeout_add(1000, self._tick_run_timer)
         # All widgets and restored selectors exist before refresh runs.
         self.refresh_build()
         self.refresh_campaign()
+        self.refresh_regex_list()
 
-    def _build_overview_page(self):
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        page.add_css_class("page-container")
+    def _select_page(self, page_id: str):
+        self.page_stack.set_visible_child_name(page_id)
+        for key, btn in self._nav_buttons.items():
+            if btn.get_active() != (key == page_id):
+                btn.set_active(key == page_id)
 
-        hero_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        hero_card.add_css_class("planner-card")
-        hero_kicker = Gtk.Label(label="SELECTED BUILD")
-        hero_kicker.add_css_class("section-kicker"); hero_kicker.set_xalign(0); hero_card.append(hero_kicker)
-        self.profile_label = Gtk.Label()
-        self.profile_label.add_css_class("title-2"); self.profile_label.set_xalign(0); self.profile_label.set_wrap(True)
-        hero_card.append(self.profile_label)
-        self.overview_meta = Gtk.Label()
-        self.overview_meta.set_xalign(0); self.overview_meta.set_wrap(True); self.overview_meta.add_css_class("planner-subtle")
-        hero_card.append(self.overview_meta)
-        page.append(hero_card)
+    def _on_nav_pill_clicked(self, button, page_id: str):
+        if button.get_active():
+            self._select_page(page_id)
+        elif self.page_stack.get_visible_child_name() == page_id:
+            button.set_active(True)
 
-        import_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        import_card.add_css_class("planner-card")
-        import_title = Gtk.Label(label="Import a build")
-        import_title.add_css_class("heading"); import_title.set_xalign(0); import_card.append(import_title)
-        import_hint = Gtk.Label(label="Paste a public pobb.in link, PoB Community share code, or XML. Links need internet; codes and XML work offline.")
-        import_hint.set_xalign(0); import_hint.set_wrap(True); import_hint.add_css_class("planner-subtle"); import_card.append(import_hint)
+    def _on_window_key_pressed(self, _ctrl, keyval, _keycode, state):
+        if not (state & Gdk.ModifierType.CONTROL_MASK):
+            return False
+        key_map = {
+            Gdk.KEY_1: "overview",
+            Gdk.KEY_2: "tree",
+            Gdk.KEY_3: "loadouts",
+            Gdk.KEY_4: "campaign",
+            Gdk.KEY_5: "regex",
+        }
+        if keyval in key_map:
+            self._select_page(key_map[keyval])
+            return True
+        if keyval in (Gdk.KEY_i, Gdk.KEY_I):
+            self.open_import_dialog()
+            return True
+        return False
+
+    def open_import_dialog(self):
+        if self.import_dialog is not None:
+            self.import_dialog.present()
+            return
+        dlg = Gtk.Window(
+            title="Import Path of Building",
+            transient_for=self.planner,
+            modal=True,
+            default_width=560,
+            default_height=310,
+        )
+        dlg.add_css_class("planner-window")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(18); box.set_margin_bottom(18)
+        box.set_margin_start(18); box.set_margin_end(18)
+        dlg.set_child(box)
+
+        head_row = Gtk.Box(spacing=10)
+        head_title = Gtk.Label(label="Paste a pobb.in link, PoB share code, or XML")
+        head_title.add_css_class("heading"); head_title.set_xalign(0); head_title.set_hexpand(True)
+        head_row.append(head_title)
+        paste_btn = Gtk.Button(label="Paste from Clipboard")
+        paste_btn.connect("clicked", self._paste_into_import)
+        head_row.append(paste_btn)
+        box.append(head_row)
+
+        hint = Gtk.Label(label="pobb.in links fetch online; share codes and XML work completely offline (max 2 MiB input).")
+        hint.set_xalign(0); hint.set_wrap(True); hint.add_css_class("planner-subtle")
+        box.append(hint)
+
         self.code_entry = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, monospace=True)
         self.code_entry.set_top_margin(8); self.code_entry.set_bottom_margin(8)
         self.code_entry.set_left_margin(10); self.code_entry.set_right_margin(10)
-        entry_scroll = Gtk.ScrolledWindow(); entry_scroll.set_min_content_height(68); entry_scroll.set_max_content_height(96)
-        entry_scroll.set_child(self.code_entry); import_card.append(entry_scroll)
-        import_row = Gtk.Box(spacing=8)
+        entry_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=120)
+        entry_scroll.set_child(self.code_entry)
+        box.append(entry_scroll)
+
+        self.import_status_label = Gtk.Label(label="")
+        self.import_status_label.set_xalign(0); self.import_status_label.set_wrap(True)
+        self.import_status_label.add_css_class("planner-accent")
+        self.import_status_label.set_visible(False)
+        box.append(self.import_status_label)
+
+        actions = Gtk.Box(spacing=8)
+        clear_btn = Gtk.Button(label="Clear")
+        clear_btn.connect("clicked", lambda *_: self.code_entry.get_buffer().set_text(""))
+        actions.append(clear_btn)
+        actions.append(Gtk.Box(hexpand=True))
+        cancel_btn = Gtk.Button(label="Cancel")
+        cancel_btn.connect("clicked", lambda *_: dlg.close())
+        actions.append(cancel_btn)
         self.import_button = Gtk.Button(label="Import build")
         self.import_button.add_css_class("suggested-action")
         self.import_button.connect("clicked", self.import_build)
-        import_row.append(self.import_button)
-        clear_btn = Gtk.Button(label="Clear")
-        clear_btn.connect("clicked", lambda *_: self.code_entry.get_buffer().set_text(""))
-        import_row.append(clear_btn)
-        input_limits = Gtk.Label(label="2 MiB input · 8 MiB decoded build")
-        input_limits.add_css_class("planner-subtle"); input_limits.set_hexpand(True); input_limits.set_xalign(1)
-        import_row.append(input_limits); import_card.append(import_row)
-        page.append(import_card)
+        actions.append(self.import_button)
+        box.append(actions)
 
-        notes_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, vexpand=True)
+        def on_close(_win):
+            self.import_dialog = None
+            self.import_status_label = None
+            return False
+
+        dlg.connect("close-request", on_close)
+        self.import_dialog = dlg
+        dlg.present()
+
+    def _paste_into_import(self, *_):
+        display = Gdk.Display.get_default()
+        if display is None:
+            return
+        clipboard = display.get_clipboard()
+
+        def on_read(cb, result):
+            try:
+                text = cb.read_text_finish(result)
+                if text and self.code_entry is not None:
+                    self.code_entry.get_buffer().set_text(text.strip())
+            except Exception:
+                pass
+
+        clipboard.read_text_async(None, on_read)
+
+    def _build_overview_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14, hexpand=True, vexpand=True)
+        page.add_css_class("page-container")
+
+        hero_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        hero_card.add_css_class("hero-card")
+        top_row = Gtk.Box(spacing=12)
+        hero_left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, hexpand=True)
+        hero_kicker = Gtk.Label(label="ACTIVE BUILD DESK")
+        hero_kicker.add_css_class("section-kicker"); hero_kicker.set_xalign(0); hero_left.append(hero_kicker)
+        self.profile_label = Gtk.Label()
+        self.profile_label.add_css_class("title-1"); self.profile_label.set_xalign(0); self.profile_label.set_wrap(True)
+        hero_left.append(self.profile_label)
+        self.overview_meta = Gtk.Label()
+        self.overview_meta.set_xalign(0); self.overview_meta.set_wrap(True); self.overview_meta.add_css_class("planner-subtle")
+        hero_left.append(self.overview_meta)
+        top_row.append(hero_left)
+
+        quick_actions = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
+        for label, target, primary in (
+            ("Passive Tree", "tree", False),
+            ("Loadouts", "loadouts", False),
+            ("Campaign", "campaign", False),
+            ("+ Import Build", None, True),
+        ):
+            btn = Gtk.Button(label=label)
+            if primary:
+                btn.add_css_class("suggested-action")
+                btn.connect("clicked", lambda *_: self.open_import_dialog())
+            else:
+                btn.connect("clicked", lambda _b, t=target: self._select_page(t))
+            quick_actions.append(btn)
+        top_row.append(quick_actions)
+        hero_card.append(top_row)
+
+        self.overview_pills = Gtk.Box(spacing=8)
+        hero_card.append(self.overview_pills)
+        page.append(hero_card)
+
+        notes_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, vexpand=True)
         notes_card.add_css_class("planner-card")
+        notes_header = Gtk.Box(spacing=10)
+        notes_title = Gtk.Label(label="Build notes")
+        notes_title.add_css_class("heading"); notes_title.set_xalign(0); notes_title.set_hexpand(True)
+        notes_header.append(notes_title)
+        self.notes_search_entry = Gtk.SearchEntry()
+        self.notes_search_entry.set_placeholder_text("Find in notes…")
+        self.notes_search_entry.set_size_request(220, -1)
+        self.notes_search_entry.connect("search-changed", self._on_notes_search)
+        self.notes_search_entry.connect("activate", self._on_notes_search_next)
+        notes_header.append(self.notes_search_entry)
+        notes_card.append(notes_header)
+
         self.notes_view = Gtk.TextView(editable=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
         self.notes_view.set_top_margin(10); self.notes_view.set_bottom_margin(10)
         self.notes_view.set_left_margin(12); self.notes_view.set_right_margin(12)
-        notes_title = Gtk.Label(label="Build notes")
-        notes_title.add_css_class("heading"); notes_title.set_xalign(0); notes_card.append(notes_title)
-        note_scroll = Gtk.ScrolledWindow(); note_scroll.set_min_content_height(180); note_scroll.set_vexpand(True)
-        note_scroll.set_child(self.notes_view); notes_card.append(note_scroll)
+        note_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=260)
+        note_scroll.set_child(self.notes_view)
+        notes_card.append(note_scroll)
         page.append(notes_card)
 
-        hint = Gtk.Label(label="Passive allocations and loadouts are read-only. No build calculations are performed.")
-        hint.set_xalign(0); hint.set_wrap(True); hint.add_css_class("planner-subtle"); page.append(hint)
-        self.page_stack.add_titled(self._scrolled(page), "overview", "Overview")
+        # Keep fallback code_entry reference for non-dialog paths
+        self.code_entry = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, monospace=True)
+        self.import_button = self.header_import_button
+
+        self.page_stack.add_titled(page, "overview", "Overview")
+
+    def _on_notes_search(self, entry):
+        self._notes_search_offset = 0
+        self._find_in_notes(entry.get_text().strip(), advance_next=False)
+
+    def _on_notes_search_next(self, entry):
+        self._find_in_notes(entry.get_text().strip(), advance_next=True)
+
+    def _find_in_notes(self, query: str, advance_next: bool):
+        if not query or self.notes_view is None:
+            return
+        buf = self.notes_view.get_buffer()
+        full = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
+        low_full = full.lower()
+        low_q = query.lower()
+        start = self._notes_search_offset + (1 if advance_next else 0)
+        idx = low_full.find(low_q, start)
+        if idx == -1 and start > 0:
+            idx = low_full.find(low_q, 0)
+        if idx == -1:
+            return
+        self._notes_search_offset = idx
+        it_start = buf.get_iter_at_offset(idx)
+        it_end = buf.get_iter_at_offset(idx + len(query))
+        buf.select_range(it_start, it_end)
+        self.notes_view.scroll_to_iter(it_start, 0.2, False, 0.0, 0.0)
 
     def _build_tree_page(self):
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, hexpand=True, vexpand=True)
@@ -650,12 +1059,30 @@ class Companion(Gtk.Application):
         toolbar = Gtk.Box(spacing=8)
         toolbar.add_css_class("toolbar-bar")
         self.tree_variant_combo = Gtk.DropDown.new_from_strings(["No tree selected"])
-        self.tree_variant_combo.set_size_request(210, -1)
+        self.tree_variant_combo.set_size_request(195, -1)
         self.tree_variant_combo.set_hexpand(False)
         self.tree_variant_combo.set_factory(self._tree_title_factory(ellipsize=True))
         self.tree_variant_combo.set_list_factory(self._tree_title_factory(ellipsize=False))
         self.tree_variant_combo.connect("notify::selected", self.change_tree_spec)
         toolbar.append(self.tree_variant_combo)
+
+        self.tree_diff_combo = Gtk.DropDown.new_from_strings(["Diff: Off"])
+        self.tree_diff_combo.set_size_request(165, -1)
+        self.tree_diff_combo.set_tooltip_text("Compare allocated nodes against another tree variant (green = added, red = respecced)")
+        self.tree_diff_combo.set_factory(self._tree_title_factory(ellipsize=True))
+        self.tree_diff_combo.set_list_factory(self._tree_title_factory(ellipsize=False))
+        self.tree_diff_combo.connect("notify::selected", self._on_tree_diff_changed)
+        toolbar.append(self.tree_diff_combo)
+
+        self.tree_diff_added_badge = Gtk.Label(label="")
+        self.tree_diff_added_badge.add_css_class("diff-pill-add")
+        self.tree_diff_added_badge.set_visible(False)
+        toolbar.append(self.tree_diff_added_badge)
+
+        self.tree_diff_removed_badge = Gtk.Label(label="")
+        self.tree_diff_removed_badge.add_css_class("diff-pill-rem")
+        self.tree_diff_removed_badge.set_visible(False)
+        toolbar.append(self.tree_diff_removed_badge)
 
         self.tree_search_entry = Gtk.SearchEntry()
         self.tree_search_entry.set_placeholder_text("Search nodes or stats…")
@@ -682,7 +1109,7 @@ class Companion(Gtk.Application):
         toolbar.append(fit)
 
         all_asc = Gtk.ToggleButton(label="All asc.")
-        all_asc.set_tooltip_text("Show all ascendancies (off by default to avoid GGG sibling portrait overlaps)")
+        all_asc.set_tooltip_text("Show all ascendancies (off by default to avoid sibling portrait overlaps)")
         all_asc.connect("toggled", self._on_toggle_all_ascendancies)
         self.tree_all_asc_button = all_asc
         toolbar.append(all_asc)
@@ -725,7 +1152,7 @@ class Companion(Gtk.Application):
 
         detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         detail.add_css_class("planner-card")
-        detail.set_size_request(230, -1)
+        detail.set_size_request(240, -1)
         detail.set_margin_start(8)
 
         detail_kicker = Gtk.Label(label="INSPECTOR")
@@ -751,14 +1178,14 @@ class Companion(Gtk.Application):
         def fit_tree_pane(paned, _pspec):
             width = paned.get_width()
             if width > 0:
-                position = max(320, width - 280)
+                position = max(320, width - 290)
                 if paned.get_position() != position:
                     paned.set_position(position)
         body.connect("notify::width", fit_tree_pane)
-        body.set_position(660)
+        body.set_position(720)
         page.append(body)
 
-        note = Gtk.Label(label="Scroll to zoom at cursor · Drag to pan · Hover for tooltips · Keys: + / - / 0 / Esc. Cluster-jewel, tattoo, and override transformations are not applied.")
+        note = Gtk.Label(label="Scroll to zoom at cursor · Drag to pan · Hover for tooltips · Keys: + / - / 0 / Esc · Use Diff to compare leveling trees.")
         note.set_xalign(0); note.set_wrap(True); note.add_css_class("planner-subtle"); page.append(note)
         self.page_stack.add_titled(page, "tree", "Passive tree")
 
@@ -770,7 +1197,7 @@ class Companion(Gtk.Application):
             if ellipsize:
                 label.set_single_line_mode(True)
                 label.set_ellipsize(Pango.EllipsizeMode.END)
-                label.set_max_width_chars(26)
+                label.set_max_width_chars(24)
             label.set_margin_start(6); label.set_margin_end(6)
             item.set_child(label)
         def bind(_factory, item):
@@ -781,84 +1208,131 @@ class Companion(Gtk.Application):
         return factory
 
     def _build_loadouts_page(self):
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True, vexpand=True)
         page.add_css_class("page-container")
 
-        header_card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        header_card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         header_card.add_css_class("toolbar-bar")
-        title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
-        heading = Gtk.Label(label="Gear and skill sets")
-        heading.add_css_class("title-3"); heading.set_xalign(0); title_box.append(heading)
-        sub = Gtk.Label(label="Switch linked PoB loadouts or inspect gear and gem setups independently.")
-        sub.add_css_class("planner-subtle"); sub.set_xalign(0); sub.set_wrap(True); title_box.append(sub)
-        header_card.append(title_box)
 
-        linked_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        linked_label = Gtk.Label(label="LINKED LOADOUT")
-        linked_label.set_xalign(0); linked_label.add_css_class("section-kicker"); linked_box.append(linked_label)
+        self.loadout_filter_entry = Gtk.SearchEntry()
+        self.loadout_filter_entry.set_placeholder_text("Filter gear slots, item names, or gems…")
+        self.loadout_filter_entry.set_hexpand(True)
+        self.loadout_filter_entry.connect("search-changed", self._on_loadout_filter_changed)
+        header_card.append(self.loadout_filter_entry)
+
+        linked_lbl = Gtk.Label(label="LINKED LOADOUT")
+        linked_lbl.add_css_class("section-kicker")
+        header_card.append(linked_lbl)
         self.linked_loadout_combo = Gtk.DropDown.new_from_strings(["No linked loadouts"])
         self.linked_loadout_combo.set_size_request(240, -1)
         self.linked_loadout_combo.connect("notify::selected", self.change_linked_loadout)
-        linked_box.append(self.linked_loadout_combo)
-        header_card.append(linked_box)
+        header_card.append(self.linked_loadout_combo)
         page.append(header_card)
 
         independent = Gtk.Box(spacing=14, hexpand=True, vexpand=True)
         gear = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, hexpand=True, vexpand=True)
         gear.add_css_class("planner-card")
+        gear_top = Gtk.Box(spacing=10)
         gear_header = Gtk.Label(label="Gear")
-        gear_header.add_css_class("heading"); gear_header.set_xalign(0); gear.append(gear_header)
+        gear_header.add_css_class("heading"); gear_header.set_xalign(0); gear_header.set_hexpand(True)
+        gear_top.append(gear_header)
         self.item_set_combo = Gtk.DropDown.new_from_strings(["No gear sets"])
+        self.item_set_combo.set_size_request(200, -1)
         self.item_set_combo.connect("notify::selected", self.change_item_set)
-        gear.append(self.item_set_combo)
+        gear_top.append(self.item_set_combo)
+        gear.append(gear_top)
+
         self.item_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.item_list.add_css_class("boxed-list")
         self.item_list.connect("row-selected", self.select_item_slot)
-        item_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=220); item_scroll.set_child(self.item_list)
+        item_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=190)
+        item_scroll.set_child(self.item_list)
         gear.append(item_scroll)
-        self.item_detail_view = Gtk.TextView(editable=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        self.item_detail_view.set_top_margin(8); self.item_detail_view.set_bottom_margin(8)
-        self.item_detail_view.set_left_margin(10); self.item_detail_view.set_right_margin(10)
-        detail_scroll = Gtk.ScrolledWindow(min_content_height=160); detail_scroll.set_child(self.item_detail_view)
+
+        self.item_card_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        detail_scroll = Gtk.ScrolledWindow(min_content_height=200)
+        detail_scroll.set_child(self.item_card_container)
         gear.append(detail_scroll)
 
         skills = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, hexpand=True, vexpand=True)
         skills.add_css_class("planner-card")
-        skill_header = Gtk.Label(label="Skills and gems")
-        skill_header.add_css_class("heading"); skill_header.set_xalign(0); skills.append(skill_header)
+        skill_top = Gtk.Box(spacing=10)
+        skill_header = Gtk.Label(label="Skills & Gem Links")
+        skill_header.add_css_class("heading"); skill_header.set_xalign(0); skill_header.set_hexpand(True)
+        skill_top.append(skill_header)
         self.skill_set_combo = Gtk.DropDown.new_from_strings(["No skill sets"])
+        self.skill_set_combo.set_size_request(200, -1)
         self.skill_set_combo.connect("notify::selected", self.change_skill_set)
-        skills.append(self.skill_set_combo)
-        self.skill_detail = Gtk.TextView(editable=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        self.skill_detail.set_top_margin(10); self.skill_detail.set_bottom_margin(10)
-        self.skill_detail.set_left_margin(12); self.skill_detail.set_right_margin(12)
-        skill_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=340); skill_scroll.set_child(self.skill_detail)
+        skill_top.append(self.skill_set_combo)
+        skills.append(skill_top)
+
+        self.skill_cards_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        skill_scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=340)
+        skill_scroll.set_child(self.skill_cards_box)
         skills.append(skill_scroll)
 
         independent.append(gear); independent.append(skills)
         page.append(independent)
-        link_note = Gtk.Label(label="Independent selectors preserve the build's own active gear and skill sets. A linked loadout appears only when PoB titles or explicit identifiers establish a match.")
-        link_note.set_xalign(0); link_note.set_wrap(True); link_note.add_css_class("planner-subtle"); page.append(link_note)
-        self.page_stack.add_titled(self._scrolled(page), "loadouts", "Loadouts")
+        self.page_stack.add_titled(page, "loadouts", "Loadouts")
 
     def _build_campaign_page(self):
-        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True, vexpand=True)
         page.add_css_class("page-container")
 
+        # Top toolbar: Act selector + Step nav + Live Run Timer
         nav = Gtk.Box(spacing=10)
         nav.add_css_class("toolbar-bar")
         act_labels = [f"Act {x['act']} · {x['title']}" for x in self.campaign]
         self.campaign_act = Gtk.DropDown.new_from_strings(act_labels)
         self.campaign_act.set_selected(self.store.data["act"])
-        self.campaign_act.set_size_request(240, -1)
+        self.campaign_act.set_size_request(230, -1)
         self.campaign_act.connect("notify::selected", self.change_act)
         nav.append(self.campaign_act)
-        nav.append(Gtk.Box(hexpand=True))
-        prev = Gtk.Button(label="← Previous"); prev.connect("clicked", lambda *_: self.move_step(-1)); nav.append(prev)
+
+        prev = Gtk.Button(label="← Prev"); prev.connect("clicked", lambda *_: self.move_step(-1)); nav.append(prev)
         nxt = Gtk.Button(label="Next →"); nxt.add_css_class("suggested-action"); nxt.connect("clicked", lambda *_: self.move_step(1)); nav.append(nxt)
+
+        nav.append(Gtk.Box(hexpand=True))
+
+        self.timer_label = Gtk.Label(label="00:00")
+        self.timer_label.add_css_class("timer-readout")
+        nav.append(self.timer_label)
+
+        self.timer_toggle_btn = Gtk.Button(label="▶ Start")
+        self.timer_toggle_btn.set_tooltip_text("Start / pause campaign run timer (auto-splits on new Acts)")
+        self.timer_toggle_btn.connect("clicked", self._on_timer_toggle)
+        nav.append(self.timer_toggle_btn)
+
+        timer_reset_btn = Gtk.Button(label="↺")
+        timer_reset_btn.add_css_class("compact-btn")
+        timer_reset_btn.set_tooltip_text("Reset run timer and Act splits")
+        timer_reset_btn.connect("clicked", self._on_timer_reset)
+        nav.append(timer_reset_btn)
         page.append(nav)
 
-        step_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        # Split pane: Interactive Act Checklist (left) + Active Step & Splits & HUD Settings (right)
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, wide_handle=True, hexpand=True, vexpand=True)
+
+        checklist_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        checklist_card.add_css_class("planner-card")
+        checklist_card.set_size_request(260, -1)
+        checklist_card.set_margin_end(8)
+        cl_kicker = Gtk.Label(label="ACT CHECKLIST")
+        cl_kicker.add_css_class("section-kicker"); cl_kicker.set_xalign(0); checklist_card.append(cl_kicker)
+        self.campaign_step_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.campaign_step_list.add_css_class("boxed-list")
+        self.campaign_step_list.connect("row-selected", self._on_campaign_row_selected)
+        cl_scroll = Gtk.ScrolledWindow(vexpand=True)
+        cl_scroll.set_child(self.campaign_step_list)
+        checklist_card.append(cl_scroll)
+        paned.set_start_child(checklist_card)
+        paned.set_resize_start_child(False)
+        paned.set_shrink_start_child(False)
+
+        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True, vexpand=True)
+        right_box.set_margin_start(6)
+
+        step_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=11)
         step_card.add_css_class("planner-card")
         self.campaign_progress = Gtk.ProgressBar()
         self.campaign_progress.set_show_text(False)
@@ -880,7 +1354,7 @@ class Companion(Gtk.Application):
         self.tip_label.set_xalign(0); self.tip_label.set_wrap(True)
         tip_box.append(self.tip_label)
         step_card.append(tip_box)
-        page.append(step_card)
+        right_box.append(step_card)
 
         ctx_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         ctx_card.add_css_class("context-card")
@@ -889,57 +1363,58 @@ class Companion(Gtk.Application):
         self.context_label = Gtk.Label(wrap=True, selectable=True)
         self.context_label.set_xalign(0); self.context_label.set_wrap(True); self.context_label.add_css_class("planner-subtle")
         ctx_card.append(self.context_label)
-        page.append(ctx_card)
+        right_box.append(ctx_card)
 
+        # Recorded Act splits strip
+        self.splits_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.splits_card.add_css_class("context-card")
+        splits_kicker = Gtk.Label(label="ACT SPLITS")
+        splits_kicker.add_css_class("section-kicker"); splits_kicker.set_xalign(0); self.splits_card.append(splits_kicker)
+        self.splits_flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, row_spacing=6, column_spacing=6)
+        self.splits_card.append(self.splits_flow)
+        self.splits_card.set_visible(False)
+        right_box.append(self.splits_card)
+
+        # Collapsible HUD settings so the campaign workspace stays uncluttered
+        hud_expander = Gtk.Expander(label="In-Game Overlay & Client.txt Tracking Settings")
+        hud_expander.add_css_class("planner-card")
         hud_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        hud_card.add_css_class("planner-card")
+        hud_card.set_margin_top(10)
+
         hud_head = Gtk.Box(spacing=10)
-        hud_title_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
-        hud_kicker = Gtk.Label(label="IN-GAME OVERLAY (WAYLAND HUD)")
-        hud_kicker.add_css_class("section-kicker"); hud_kicker.set_xalign(0); hud_title_box.append(hud_kicker)
-        hud_sub = Gtk.Label(label="Shows automatically while PoE 1 is focused. Click-through by default.")
-        hud_sub.add_css_class("planner-subtle"); hud_sub.set_xalign(0); hud_sub.set_wrap(True); hud_title_box.append(hud_sub)
-        hud_head.append(hud_title_box)
+        hud_sub = Gtk.Label(label="Shows automatically while PoE 1 is focused. Click-through by default except mini-buttons.")
+        hud_sub.add_css_class("planner-subtle"); hud_sub.set_xalign(0); hud_sub.set_wrap(True); hud_sub.set_hexpand(True)
+        hud_head.append(hud_sub)
         self.hud_preview_button = Gtk.ToggleButton(label="Preview HUD")
         self.hud_preview_button.set_tooltip_text("Temporarily show the overlay on screen to check placement and opacity")
         self.hud_preview_button.connect("toggled", self._on_hud_preview_toggled)
         hud_head.append(self.hud_preview_button)
         hud_card.append(hud_head)
 
-        row1 = Gtk.Box(spacing=16)
-        en_box = Gtk.Box(spacing=8)
-        en_lbl = Gtk.Label(label="Enable overlay"); en_lbl.set_xalign(0); en_box.append(en_lbl)
-        self.hud_enabled_switch = Gtk.Switch(active=self.hud_prefs["enabled"], valign=Gtk.Align.CENTER)
-        self.hud_enabled_switch.connect("notify::active", self._on_hud_pref_changed)
-        en_box.append(self.hud_enabled_switch)
-        row1.append(en_box)
+        row1 = Gtk.Box(spacing=14)
+        for text, attr, key in (
+            ("Enable overlay", "hud_enabled_switch", "enabled"),
+            ("Compact bar", "hud_compact_switch", "compact"),
+            ("Mini-buttons", "hud_interactive_switch", "interactive_controls"),
+            ("Timer on HUD", "hud_timer_switch", "show_timer"),
+        ):
+            grp = Gtk.Box(spacing=6)
+            lbl = Gtk.Label(label=text); lbl.set_xalign(0); grp.append(lbl)
+            sw = Gtk.Switch(active=self.hud_prefs[key], valign=Gtk.Align.CENTER)
+            sw.connect("notify::active", self._on_hud_pref_changed)
+            setattr(self, attr, sw)
+            grp.append(sw)
+            row1.append(grp)
+        hud_card.append(row1)
 
-        cmp_box = Gtk.Box(spacing=8)
-        cmp_lbl = Gtk.Label(label="Compact bar"); cmp_lbl.set_xalign(0); cmp_box.append(cmp_lbl)
-        self.hud_compact_switch = Gtk.Switch(active=self.hud_prefs["compact"], valign=Gtk.Align.CENTER)
-        self.hud_compact_switch.connect("notify::active", self._on_hud_pref_changed)
-        cmp_box.append(self.hud_compact_switch)
-        row1.append(cmp_box)
-
-        mini_box = Gtk.Box(spacing=8)
-        mini_lbl = Gtk.Label(label="Clickable mini-buttons"); mini_lbl.set_xalign(0); mini_box.append(mini_lbl)
-        self.hud_interactive_switch = Gtk.Switch(active=self.hud_prefs["interactive_controls"], valign=Gtk.Align.CENTER)
-        self.hud_interactive_switch.set_tooltip_text("Allow clicking the small ← / → / ▾ buttons on the HUD while keeping the rest of the overlay click-through")
-        self.hud_interactive_switch.connect("notify::active", self._on_hud_pref_changed)
-        mini_box.append(self.hud_interactive_switch)
-        row1.append(mini_box)
-
-        pos_box = Gtk.Box(spacing=8, hexpand=True)
-        pos_lbl = Gtk.Label(label="Position"); pos_lbl.add_css_class("planner-subtle"); pos_box.append(pos_lbl)
+        row2 = Gtk.Box(spacing=12)
+        pos_lbl = Gtk.Label(label="Position"); pos_lbl.add_css_class("planner-subtle"); row2.append(pos_lbl)
         self.hud_position_combo = Gtk.DropDown.new_from_strings([label for _, label in HUD_POSITIONS])
         pos_keys = [key for key, _ in HUD_POSITIONS]
         self.hud_position_combo.set_selected(pos_keys.index(self.hud_prefs["position"]) if self.hud_prefs["position"] in pos_keys else 0)
         self.hud_position_combo.connect("notify::selected", self._on_hud_pref_changed)
-        pos_box.append(self.hud_position_combo)
-        row1.append(pos_box)
-        hud_card.append(row1)
+        row2.append(self.hud_position_combo)
 
-        row2 = Gtk.Box(spacing=14)
         op_lbl = Gtk.Label(label="Opacity"); op_lbl.add_css_class("planner-subtle"); row2.append(op_lbl)
         self.hud_opacity_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 45, 96, 1)
         self.hud_opacity_scale.set_value(round(self.hud_prefs["opacity"] * 100))
@@ -965,13 +1440,74 @@ class Companion(Gtk.Application):
         row3.append(self.client_log_status)
         hud_card.append(row3)
 
-        hotkey_hint = Gtk.Label(label="CLI hotkeys (work while click-through): --next-step · --prev-step · --toggle-compact · --toggle-hud · --toggle-clickable")
-        hotkey_hint.set_xalign(0); hotkey_hint.set_wrap(True); hotkey_hint.add_css_class("planner-subtle")
-        hud_card.append(hotkey_hint)
-        page.append(hud_card)
+        hud_expander.set_child(hud_card)
+        right_box.append(hud_expander)
 
-        page.append(Gtk.Box(vexpand=True))
-        self.page_stack.add_titled(self._scrolled(page), "campaign", "Campaign")
+        paned.set_end_child(self._scrolled(right_box))
+        paned.set_resize_end_child(True)
+        paned.set_shrink_end_child(False)
+        paned.set_position(300)
+        page.append(paned)
+
+        self.page_stack.add_titled(page, "campaign", "Campaign")
+
+    def _build_regex_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=True, vexpand=True)
+        page.add_css_class("page-container")
+
+        toolbar = Gtk.Box(spacing=8)
+        toolbar.add_css_class("toolbar-bar")
+        self.regex_search_entry = Gtk.SearchEntry()
+        self.regex_search_entry.set_placeholder_text("Filter regex presets…")
+        self.regex_search_entry.set_hexpand(True)
+        self.regex_search_entry.connect("search-changed", lambda *_: self.refresh_regex_list())
+        toolbar.append(self.regex_search_entry)
+
+        self._regex_cat_buttons = {}
+        for cat in ("All", "Leveling", "Vendors", "Gear", "Endgame", "Custom"):
+            btn = Gtk.ToggleButton(label=cat)
+            btn.add_css_class("nav-pill-btn")
+            btn.set_active(cat == "All")
+            btn.connect("clicked", self._on_regex_category_clicked, cat)
+            toolbar.append(btn)
+            self._regex_cat_buttons[cat] = btn
+
+        self.regex_add_toggle = Gtk.ToggleButton(label="+ Add Regex")
+        self.regex_add_toggle.add_css_class("suggested-action")
+        self.regex_add_toggle.connect("toggled", lambda b: self.regex_add_box.set_visible(b.get_active()))
+        toolbar.append(self.regex_add_toggle)
+        page.append(toolbar)
+
+        # Collapsible inline custom regex creator
+        self.regex_add_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.regex_add_box.add_css_class("planner-card")
+        self.regex_add_box.set_visible(False)
+        add_row1 = Gtk.Box(spacing=8)
+        self.regex_new_title = Gtk.Entry(placeholder_text="Preset title (e.g., B-B-G + Chaos Res)")
+        self.regex_new_title.set_hexpand(True)
+        add_row1.append(self.regex_new_title)
+        self.regex_new_note = Gtk.Entry(placeholder_text="Optional short note")
+        self.regex_new_note.set_hexpand(True)
+        add_row1.append(self.regex_new_note)
+        self.regex_add_box.append(add_row1)
+
+        add_row2 = Gtk.Box(spacing=8)
+        self.regex_new_pattern = Gtk.Entry(placeholder_text="PoE search regex (max 250 chars)")
+        self.regex_new_pattern.set_hexpand(True)
+        add_row2.append(self.regex_new_pattern)
+        save_regex_btn = Gtk.Button(label="Save Preset")
+        save_regex_btn.add_css_class("suggested-action")
+        save_regex_btn.connect("clicked", self._on_save_custom_regex)
+        add_row2.append(save_regex_btn)
+        self.regex_add_box.append(add_row2)
+        page.append(self.regex_add_box)
+
+        self.regex_cards_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.set_child(self.regex_cards_box)
+        page.append(scroll)
+
+        self.page_stack.add_titled(page, "regex", "Regex")
 
     @staticmethod
     def _scrolled(child):
@@ -985,12 +1521,16 @@ class Companion(Gtk.Application):
             self.status.set_text("Layer-shell support is unavailable; the planner works, but the HUD is disabled.")
             if hasattr(self, "hud_preview_button"):
                 self.hud_preview_button.set_sensitive(False)
+            if hasattr(self, "header_hud_button"):
+                self.header_hud_button.set_sensitive(False)
             return
         try:
             if not Layer.is_supported():
                 self.status.set_text("This compositor does not support Wayland layer-shell; the planner is still available.")
                 if hasattr(self, "hud_preview_button"):
                     self.hud_preview_button.set_sensitive(False)
+                if hasattr(self, "header_hud_button"):
+                    self.header_hud_button.set_sensitive(False)
                 return
             self.hud = Gtk.ApplicationWindow(application=self, title="Campaign HUD")
             self.hud.set_decorated(False)
@@ -1011,6 +1551,11 @@ class Companion(Gtk.Application):
             self.hud_act = Gtk.Label()
             self.hud_act.add_css_class("hud-kicker"); self.hud_act.set_xalign(0); self.hud_act.set_hexpand(True)
             top_row.append(self.hud_act)
+
+            self.hud_timer_label = Gtk.Label(label="00:00")
+            self.hud_timer_label.add_css_class("hud-timer")
+            self.hud_timer_label.set_visible(bool(self.hud_prefs.get("show_timer", False)))
+            top_row.append(self.hud_timer_label)
 
             self.hud_mode = Gtk.Label(label="")
             self.hud_mode.add_css_class("hud-badge")
@@ -1109,6 +1654,8 @@ class Companion(Gtk.Application):
         self.hud_expanded_box.set_visible(not compact)
         if hasattr(self, "hud_mini_controls"):
             self.hud_mini_controls.set_visible(self.clickable or interactive_controls)
+        if hasattr(self, "hud_timer_label"):
+            self.hud_timer_label.set_visible(bool(self.hud_prefs.get("show_timer", False)))
         if hasattr(self, "hud_compact_btn"):
             self.hud_compact_btn.set_label("▾" if compact else "▴")
         if hasattr(self, "hud_mode"):
@@ -1133,6 +1680,15 @@ class Companion(Gtk.Application):
                 padding: 10px 14px;
             }}
             .hud-kicker {{ font-size: 10.5px; font-weight: 700; color: #ecc06c; letter-spacing: 0.7px; }}
+            .hud-timer {{
+                font-family: monospace;
+                font-size: 10.5px;
+                font-weight: 700;
+                color: #f4d284;
+                background: rgba(25, 36, 51, 0.85);
+                border-radius: 5px;
+                padding: 2px 6px;
+            }}
             .hud-badge {{
                 font-size: 9.5px;
                 font-weight: 700;
@@ -1178,6 +1734,8 @@ class Companion(Gtk.Application):
         self.hud_prefs["compact"] = self.hud_compact_switch.get_active()
         if hasattr(self, "hud_interactive_switch"):
             self.hud_prefs["interactive_controls"] = self.hud_interactive_switch.get_active()
+        if hasattr(self, "hud_timer_switch"):
+            self.hud_prefs["show_timer"] = self.hud_timer_switch.get_active()
         if 0 <= pos_idx < len(pos_keys):
             self.hud_prefs["position"] = pos_keys[pos_idx]
         opacity_pct = round(self.hud_opacity_scale.get_value())
@@ -1190,7 +1748,17 @@ class Companion(Gtk.Application):
         self.present_hud()
 
     def _on_hud_preview_toggled(self, button):
+        if self._updating_hud_controls:
+            return
         self.hud_preview = button.get_active()
+        self._updating_hud_controls = True
+        try:
+            for btn_attr in ("hud_preview_button", "header_hud_button"):
+                other = getattr(self, btn_attr, None)
+                if other is not None and other is not button and other.get_active() != self.hud_preview:
+                    other.set_active(self.hud_preview)
+        finally:
+            self._updating_hud_controls = False
         if self.hud_preview and self.hud is not None and self.layer_ready:
             self.apply_hud_layout()
             self.hud.set_visible(True)
@@ -1242,7 +1810,11 @@ class Companion(Gtk.Application):
                 self.campaign, self.store.data["act"], self.store.data["step"], zone
             )
             if matched is not None and matched != (self.store.data["act"], self.store.data["step"]):
+                prev_act = self.store.data["act"]
                 self.store.data["act"], self.store.data["step"] = matched
+                if matched[0] > prev_act:
+                    self.run_timer.record_act_transition(prev_act, matched[0])
+                    self._refresh_splits_ui()
                 if self.campaign_act is not None:
                     self.campaign_act.set_selected(matched[0])
                 self.refresh_campaign()
@@ -1288,6 +1860,12 @@ class Companion(Gtk.Application):
                 print(f"Could not fail closed for HUD pointer input: {reset_exc}", file=sys.stderr)
             return False
 
+    def _set_import_feedback(self, message: str):
+        self.status.set_text(message)
+        if self.import_status_label is not None:
+            self.import_status_label.set_text(message)
+            self.import_status_label.set_visible(bool(message))
+
     def import_build(self, *_):
         buffer = self.code_entry.get_buffer()
         raw = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True).strip()
@@ -1297,7 +1875,7 @@ class Companion(Gtk.Application):
         try:
             build = parse_build(raw)
         except PobImportError as exc:
-            self.status.set_text(str(exc))
+            self._set_import_feedback(str(exc))
             return
         self._save_imported_build(build, buffer)
 
@@ -1308,7 +1886,7 @@ class Companion(Gtk.Application):
         self.import_request_id += 1
         request_id = self.import_request_id
         self.import_button.set_sensitive(False)
-        self.status.set_text("Fetching the public build from pobb.in…")
+        self._set_import_feedback("Fetching the public build from pobb.in…")
 
         def worker():
             try:
@@ -1330,17 +1908,17 @@ class Companion(Gtk.Application):
         buffer = self.code_entry.get_buffer()
         current = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True).strip()
         if current != raw:
-            self.status.set_text("The input changed while the link was loading; no build was imported. Review the current input and retry.")
+            self._set_import_feedback("The input changed while the link was loading; no build was imported. Review the current input and retry.")
             return GLib.SOURCE_REMOVE
         if error:
-            self.status.set_text(error)
+            self._set_import_feedback(error)
             return GLib.SOURCE_REMOVE
         self._save_imported_build(build, buffer)
         return GLib.SOURCE_REMOVE
 
     def _save_imported_build(self, build: dict, buffer):
         if len(self.store.data["builds"]) >= MAX_SAVED_BUILDS:
-            self.status.set_text(f"You can keep up to {MAX_SAVED_BUILDS} imported builds. Remove an older saved build before importing another.")
+            self._set_import_feedback(f"You can keep up to {MAX_SAVED_BUILDS} imported builds. Remove an older saved build before importing another.")
             return
         build["name"] = build.get("ascendancy") or build.get("class") or f"Build {len(self.store.data['builds']) + 1}"
         candidate = dict(self.store.data)
@@ -1349,12 +1927,14 @@ class Companion(Gtk.Application):
         try:
             self.store.save(candidate)
         except StateError as exc:
-            self.status.set_text(str(exc))
+            self._set_import_feedback(str(exc))
             return
         self.store.data = candidate
         buffer.set_text("")
         self.populate_build_model()
         self.status.set_text(f"Imported {build['name']} · saved on this computer.")
+        if self.import_dialog is not None:
+            self.import_dialog.close()
         self.refresh_build()
 
     def populate_build_model(self):
@@ -1408,16 +1988,33 @@ class Companion(Gtk.Application):
             return False
         return True
 
+    @staticmethod
+    def _clear_box(box: Gtk.Box):
+        child = box.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            box.remove(child)
+            child = nxt
+
     def refresh_build(self, *_):
         if self.notes_view is None:
             return
         build = self.current_build()
         if hasattr(self, "remove_build_button"):
             self.remove_build_button.set_sensitive(build is not None)
+        if hasattr(self, "overview_pills"):
+            self._clear_box(self.overview_pills)
         if build is None:
-            self.profile_label.set_text("Start a build desk")
-            self.overview_meta.set_text("Import a public pobb.in link, share code, or XML. The campaign guide works without a build.")
-            notes = "No build notes yet."
+            self.profile_label.set_text("Wraeclast Companion")
+            self.overview_meta.set_text("Import a public pobb.in link, share code, or XML — or jump straight into the Act 1–10 Campaign guide.")
+            notes = "No build notes yet. Click '+ Import Build' (or press Ctrl+I) to load a Path of Building guide."
+            if hasattr(self, "overview_pills"):
+                for text, gold in (("Path of Exile 1", True), ("Act 1–10 Guide Ready", False), ("Wayland HUD", False)):
+                    lbl = Gtk.Label(label=text)
+                    lbl.add_css_class("stat-pill")
+                    if gold:
+                        lbl.add_css_class("stat-pill-gold")
+                    self.overview_pills.append(lbl)
         else:
             hero = " · ".join(value for value in (build.get("class"), build.get("ascendancy")) if value)
             if build.get("level"):
@@ -1426,9 +2023,33 @@ class Companion(Gtk.Application):
             spec_count = len(build.get("tree_specs", []))
             skill_count = len(build.get("skill_sets", []))
             gear_count = len(build.get("item_sets", []))
-            self.overview_meta.set_text(" · ".join(x for x in (hero, f"{spec_count} tree variants" if spec_count else "No tree data",
-                                                                 f"{gear_count} gear sets" if gear_count else "No gear sets",
-                                                                 f"{skill_count} skill sets" if skill_count else "No named skill sets") if x))
+            selected_spec_id = build.get("selected_tree_spec", build.get("active_tree_spec", ""))
+            active_spec = next((s for s in build.get("tree_specs", []) if s.get("id") == selected_spec_id),
+                               (build.get("tree_specs") or [None])[0])
+            node_count = len(active_spec.get("nodes", [])) if active_spec else 0
+            self.overview_meta.set_text("Read-only Path of Building desk · passive tree, gear, gem links, and notes synced to your campaign HUD.")
+            if hasattr(self, "overview_pills"):
+                pills = []
+                if build.get("ascendancy"):
+                    pills.append((build["ascendancy"], True))
+                elif build.get("class"):
+                    pills.append((build["class"], True))
+                if build.get("level"):
+                    pills.append((f"Lv {build['level']}", False))
+                if node_count:
+                    pills.append((f"{node_count} passives", False))
+                if spec_count:
+                    pills.append((f"{spec_count} tree" + ("s" if spec_count != 1 else ""), False))
+                if gear_count:
+                    pills.append((f"{gear_count} gear set" + ("s" if gear_count != 1 else ""), False))
+                if skill_count:
+                    pills.append((f"{skill_count} skill set" + ("s" if skill_count != 1 else ""), False))
+                for text, gold in pills:
+                    lbl = Gtk.Label(label=text)
+                    lbl.add_css_class("stat-pill")
+                    if gold:
+                        lbl.add_css_class("stat-pill-gold")
+                    self.overview_pills.append(lbl)
             notes = build.get("notes") or "This build has no notes."
         self.render_notes(notes)
         self.populate_tree_specs(build)
@@ -1479,6 +2100,47 @@ class Companion(Gtk.Application):
         selected_index = self._selected_index(specs, "id", selected_id)
         self._set_dropdown(self.tree_variant_combo, labels, selected_index, "_updating_tree_combo")
         self.tree_variant_combo.set_tooltip_text(labels[selected_index] if labels else None)
+        self._populate_tree_diff_specs(build)
+
+    def _populate_tree_diff_specs(self, build):
+        if not hasattr(self, "tree_diff_combo"):
+            return
+        specs = build.get("tree_specs", []) if build else []
+        selected_id = build.get("selected_tree_spec", build.get("active_tree_spec", "")) if build else ""
+        others = [item for item in specs if item.get("id") != selected_id]
+        self.tree_diff_specs = others
+        labels = ["Diff: Off"] + [f"vs {item['title']}" for item in others]
+        self._set_dropdown(self.tree_diff_combo, labels, 0, "_updating_diff_combo")
+        self.tree_diff_combo.set_sensitive(bool(others))
+        self._apply_tree_diff()
+
+    def _on_tree_diff_changed(self, _dropdown, _pspec):
+        if self._updating_diff_combo:
+            return
+        self._apply_tree_diff()
+
+    def _apply_tree_diff(self):
+        if not hasattr(self, "tree_diff_combo"):
+            return
+        idx = self.tree_diff_combo.get_selected()
+        build = self.current_build()
+        if not build or idx <= 0 or idx - 1 >= len(self.tree_diff_specs):
+            self.tree_canvas.set_diff_nodes(set(), set(), "")
+            self.tree_diff_added_badge.set_visible(False)
+            self.tree_diff_removed_badge.set_visible(False)
+            return
+        specs = build.get("tree_specs", [])
+        selected_id = build.get("selected_tree_spec", build.get("active_tree_spec", ""))
+        cur_spec = next((s for s in specs if s.get("id") == selected_id), specs[0] if specs else None)
+        cmp_spec = self.tree_diff_specs[idx - 1]
+        if cur_spec is None:
+            return
+        added, removed = compute_tree_diff(cur_spec.get("nodes", []), cmp_spec.get("nodes", []))
+        self.tree_canvas.set_diff_nodes(added, removed, cmp_spec.get("title", ""))
+        self.tree_diff_added_badge.set_text(f"+{len(added)}")
+        self.tree_diff_added_badge.set_visible(bool(added))
+        self.tree_diff_removed_badge.set_text(f"−{len(removed)}")
+        self.tree_diff_removed_badge.set_visible(bool(removed))
 
     def populate_item_sets(self, build):
         sets = build.get("item_sets", []) if build else []
@@ -1504,68 +2166,114 @@ class Companion(Gtk.Application):
         self._set_dropdown(self.linked_loadout_combo, labels, index, "_updating_loadout_combo")
         self.linked_loadout_combo.set_sensitive(bool(links))
 
+    def _on_loadout_filter_changed(self, entry):
+        self._loadout_filter_query = entry.get_text().strip().lower()
+        self.refresh_loadout_views(self.current_build())
+
     def _render_item_text(self, text: str):
-        buf = self.item_detail_view.get_buffer()
-        buf.set_text("")
-        if not self.item_tags:
-            self.item_tags = {
-                "unique": buf.create_tag("item-unique", foreground="#af6025", weight=Pango.Weight.BOLD),
-                "rare": buf.create_tag("item-rare", foreground="#f5d76e", weight=Pango.Weight.BOLD),
-                "magic": buf.create_tag("item-magic", foreground="#8888ff", weight=Pango.Weight.BOLD),
-                "normal": buf.create_tag("item-normal", foreground="#e6edf5", weight=Pango.Weight.BOLD),
-                "meta": buf.create_tag("item-meta", foreground="#8a9cb0"),
-                "mod": buf.create_tag("item-mod", foreground="#8eb7ff"),
-                "sep": buf.create_tag("item-sep", foreground="#364659"),
-            }
-        lines = (text or "").splitlines()
-        rarity = "normal"
-        for line in lines[:3]:
-            low = line.strip().lower()
-            if low.startswith("rarity:"):
-                val = low.split(":", 1)[1].strip()
-                if val in ("unique", "rare", "magic", "normal"):
-                    rarity = val
-                break
-        header_done = False
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            prefix = "\n" if i > 0 else ""
-            if stripped.startswith("Rarity:"):
-                buf.insert_with_tags(buf.get_end_iter(), prefix + line, self.item_tags["meta"])
-            elif stripped.startswith("--------") or stripped == "":
-                header_done = True
-                buf.insert_with_tags(buf.get_end_iter(), prefix + ("────────────────────────" if stripped else ""), self.item_tags["sep"])
-            elif not header_done:
-                buf.insert_with_tags(buf.get_end_iter(), prefix + line, self.item_tags[rarity])
-            elif any(stripped.startswith(p) for p in ("Sockets:", "LevelReq:", "Implicits:", "Quality:", "Item Level:", "Armour:", "Evasion:", "Energy Shield:", "Crafted:", "Unique ID:", "Variant:", "Selected Variant:")):
-                buf.insert_with_tags(buf.get_end_iter(), prefix + line, self.item_tags["meta"])
-            else:
-                buf.insert_with_tags(buf.get_end_iter(), prefix + line, self.item_tags["mod"])
+        if not hasattr(self, "item_card_container"):
+            return
+        self._clear_box(self.item_card_container)
+        raw = (text or "").strip()
+        if not raw or raw.startswith("Choose an equipped item"):
+            placeholder = Gtk.Label(label=raw or "Choose an equipped item to inspect its PoB details.")
+            placeholder.add_css_class("planner-subtle")
+            placeholder.set_xalign(0); placeholder.set_wrap(True)
+            placeholder.set_margin_top(10); placeholder.set_margin_start(6)
+            self.item_card_container.append(placeholder)
+            return
+
+        parsed = parse_item_card(raw)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        card.add_css_class("poe-item-card")
+
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        header.add_css_class(f"poe-item-header-{parsed['rarity']}")
+        name_lbl = Gtk.Label(label=parsed["name"], wrap=True, selectable=True)
+        name_lbl.add_css_class("poe-item-name"); name_lbl.set_xalign(0.5)
+        header.append(name_lbl)
+        if parsed["base"]:
+            base_lbl = Gtk.Label(label=parsed["base"], wrap=True, selectable=True)
+            base_lbl.add_css_class("poe-item-base"); base_lbl.set_xalign(0.5)
+            header.append(base_lbl)
+        card.append(header)
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        body.add_css_class("poe-item-body")
+        if parsed["meta"]:
+            meta_lbl = Gtk.Label(label="\n".join(parsed["meta"]), wrap=True, selectable=True)
+            meta_lbl.add_css_class("poe-item-meta"); meta_lbl.set_xalign(0)
+            body.append(meta_lbl)
+        for sec_idx, section in enumerate(parsed["sections"]):
+            if sec_idx > 0 or parsed["meta"]:
+                sep = Gtk.Box()
+                sep.add_css_class("poe-item-sep")
+                body.append(sep)
+            sec_lbl = Gtk.Label(label="\n".join(section), wrap=True, selectable=True)
+            sec_lbl.add_css_class("poe-item-mod"); sec_lbl.set_xalign(0)
+            body.append(sec_lbl)
+        card.append(body)
+        self.item_card_container.append(card)
 
     def _render_skill_groups(self, title: str, groups: list):
-        buf = self.skill_detail.get_buffer()
-        buf.set_text("")
-        if not self.skill_tags:
-            self.skill_tags = {
-                "title": buf.create_tag("skill-title", foreground="#94a6ba", weight=Pango.Weight.BOLD),
-                "group": buf.create_tag("skill-group", foreground="#ecc06c", weight=Pango.Weight.BOLD),
-                "gem": buf.create_tag("skill-gem", foreground="#e6edf5"),
-                "empty": buf.create_tag("skill-empty", foreground="#8a9cb0"),
-            }
-        if not groups:
-            buf.insert_with_tags(buf.get_end_iter(), "No enabled gems in this set.", self.skill_tags["empty"])
+        if not hasattr(self, "skill_cards_box"):
             return
-        buf.insert_with_tags(buf.get_end_iter(), title + "\n", self.skill_tags["title"])
+        self._clear_box(self.skill_cards_box)
+        query = self._loadout_filter_query
+        shown = 0
         for group in groups:
             label = group.get("label") or "Skill group"
-            buf.insert_with_tags(buf.get_end_iter(), f"\n{label}\n", self.skill_tags["group"])
             gems = group.get("gems") or []
+            if query:
+                if query not in label.lower() and not any(query in g.lower() for g in gems):
+                    continue
+            shown += 1
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+            card.add_css_class("gem-group-card")
+
+            head = Gtk.Box(spacing=8)
+            g_lbl = Gtk.Label(label=label, xalign=0, hexpand=True, wrap=True)
+            g_lbl.add_css_class("gem-group-title")
+            head.append(g_lbl)
+
+            # Visual linked socket chain
+            sockets_row = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER)
+            for idx, gem in enumerate(gems[:6]):
+                if idx > 0:
+                    link = Gtk.Box(valign=Gtk.Align.CENTER)
+                    link.add_css_class("socket-link-bar")
+                    sockets_row.append(link)
+                dot = Gtk.Box(valign=Gtk.Align.CENTER)
+                dot.add_css_class("socket-dot")
+                dot.add_css_class(f"socket-{gem_socket_color(gem)}")
+                dot.set_tooltip_text(gem)
+                sockets_row.append(dot)
+            head.append(sockets_row)
+            card.append(head)
+
             for gem in gems:
-                buf.insert_with_tags(buf.get_end_iter(), f"  • {gem}\n", self.skill_tags["gem"])
+                row = Gtk.Box(spacing=8)
+                dot = Gtk.Box(valign=Gtk.Align.CENTER)
+                dot.add_css_class("socket-dot")
+                dot.add_css_class(f"socket-{gem_socket_color(gem)}")
+                row.append(dot)
+                gem_lbl = Gtk.Label(label=gem, xalign=0, wrap=True, selectable=True, hexpand=True)
+                gem_lbl.add_css_class("gem-row-support" if is_support_gem(gem) else "gem-row-active")
+                row.append(gem_lbl)
+                card.append(row)
+
+            self.skill_cards_box.append(card)
+
+        if shown == 0:
+            empty = Gtk.Label(label="No matching gem groups." if query else "No enabled gems in this set.")
+            empty.add_css_class("planner-subtle")
+            empty.set_xalign(0); empty.set_margin_top(8); empty.set_margin_start(4)
+            self.skill_cards_box.append(empty)
 
     def refresh_loadout_views(self, build):
         self.item_list.remove_all()
         self._render_item_text("Choose an equipped item to inspect its PoB description.")
+        query = self._loadout_filter_query
         if build:
             sets = build.get("item_sets", [])
             set_id = build.get("selected_item_set", build.get("active_item_set", ""))
@@ -1576,20 +2284,26 @@ class Companion(Gtk.Application):
                 for slot in item_set.get("slots", []):
                     if slot.get("item_id") == "0":
                         continue
+                    item_text = item_texts.get(slot["item_id"], "Item details were not saved.")
+                    slot_name = slot["name"]
+                    item_title = slot.get("title") or "Saved item"
+                    if query and query not in slot_name.lower() and query not in item_title.lower() and query not in item_text.lower():
+                        continue
                     row_box = Gtk.Box(spacing=10)
                     row_box.set_margin_top(7); row_box.set_margin_bottom(7)
                     row_box.set_margin_start(10); row_box.set_margin_end(10)
-                    slot_lbl = Gtk.Label(label=slot["name"])
+                    slot_lbl = Gtk.Label(label=slot_name)
                     slot_lbl.add_css_class("planner-subtle")
                     slot_lbl.set_xalign(0); slot_lbl.set_size_request(92, -1)
-                    name_lbl = Gtk.Label(label=slot.get("title") or "Saved item", wrap=True, hexpand=True)
+                    name_lbl = Gtk.Label(label=item_title, wrap=True, hexpand=True)
                     name_lbl.set_xalign(0)
                     row_box.append(slot_lbl); row_box.append(name_lbl)
                     row = Gtk.ListBoxRow(child=row_box)
-                    row.item_text = item_texts.get(slot["item_id"], "Item details were not saved.")
+                    row.item_text = item_text
                     self.item_list.append(row)
                     first_row = first_row or row
-                self.item_list.select_row(first_row)
+                if first_row is not None:
+                    self.item_list.select_row(first_row)
         skill_set = None
         if build:
             skill_set = next((item for item in build.get("skill_sets", [])
@@ -1704,6 +2418,7 @@ class Companion(Gtk.Application):
             return GLib.SOURCE_REMOVE
         self.tree_graph = graph
         self.tree_canvas.set_graph(graph)
+        self._apply_tree_diff()
         self.tree_retry_button.set_sensitive(False)
         self.tree_retry_button.set_visible(False)
         if hasattr(self, "tree_search_entry") and self.tree_search_entry.get_text().strip():
@@ -1784,6 +2499,7 @@ class Companion(Gtk.Application):
         self.tree_node_title.set_text("Select a passive node")
         self.tree_node_flags.set_text("")
         self.tree_node_stats.set_text("Click any node to inspect its stats.")
+        self._populate_tree_diff_specs(build)
         self.populate_linked_loadouts(build)
         self.persist_state()
         self.refresh_passive_tree(build)
@@ -1872,6 +2588,33 @@ class Companion(Gtk.Application):
         self.tip_label.set_text(item["tip"])
         if hasattr(self, "campaign_progress"):
             self.campaign_progress.set_fraction(fraction)
+        if hasattr(self, "campaign_step_list"):
+            self._updating_campaign_list = True
+            try:
+                self.campaign_step_list.remove_all()
+                selected_row = None
+                for idx, st in enumerate(steps):
+                    row_box = Gtk.Box(spacing=8)
+                    row_box.set_margin_top(7); row_box.set_margin_bottom(7)
+                    row_box.set_margin_start(10); row_box.set_margin_end(10)
+                    marker = "✓" if idx < step else ("▶" if idx == step else "○")
+                    m_lbl = Gtk.Label(label=marker)
+                    m_lbl.set_size_request(16, -1)
+                    t_lbl = Gtk.Label(label=f"{idx + 1}. {st['title']}", xalign=0, wrap=True, hexpand=True)
+                    css_cls = "campaign-step-done" if idx < step else ("campaign-step-active" if idx == step else "campaign-step-pending")
+                    m_lbl.add_css_class(css_cls)
+                    t_lbl.add_css_class(css_cls)
+                    row_box.append(m_lbl)
+                    row_box.append(t_lbl)
+                    row = Gtk.ListBoxRow(child=row_box)
+                    row.step_index = idx
+                    self.campaign_step_list.append(row)
+                    if idx == step:
+                        selected_row = row
+                if selected_row is not None:
+                    self.campaign_step_list.select_row(selected_row)
+            finally:
+                self._updating_campaign_list = False
         if self.hud is not None:
             self.hud_act.set_text(f"ACT {act+1} · {self.campaign[act]['title'].upper()} · {step+1}/{len(steps)}")
             self.hud_title.set_text(item["title"])
@@ -1883,16 +2626,181 @@ class Companion(Gtk.Application):
         self.update_context()
         self.persist_state()
 
+    def _on_campaign_row_selected(self, _listbox, row):
+        if self._updating_campaign_list or row is None:
+            return
+        idx = getattr(row, "step_index", None)
+        if idx is None or idx == self.store.data["step"]:
+            return
+        self.store.data["step"] = idx
+        self.refresh_campaign()
+
+    def _tick_run_timer(self):
+        formatted = self.run_timer.formatted()
+        if hasattr(self, "timer_label"):
+            self.timer_label.set_text(formatted)
+        if hasattr(self, "hud_timer_label"):
+            self.hud_timer_label.set_text(formatted)
+        return GLib.SOURCE_CONTINUE
+
+    def _on_timer_toggle(self, *_):
+        self.run_timer.toggle()
+        if hasattr(self, "timer_toggle_btn"):
+            self.timer_toggle_btn.set_label("⏸ Pause" if self.run_timer.running else "▶ Resume")
+        self._tick_run_timer()
+
+    def _on_timer_reset(self, *_):
+        self.run_timer.reset()
+        if hasattr(self, "timer_toggle_btn"):
+            self.timer_toggle_btn.set_label("▶ Start")
+        self._tick_run_timer()
+        self._refresh_splits_ui()
+
+    def _refresh_splits_ui(self):
+        if not hasattr(self, "splits_flow"):
+            return
+        child = self.splits_flow.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self.splits_flow.remove(child)
+            child = nxt
+        splits = self.run_timer.splits
+        self.splits_card.set_visible(bool(splits))
+        for act_num in sorted(splits):
+            chip = Gtk.Label(label=f"Act {act_num}  {format_duration(splits[act_num])}")
+            chip.add_css_class("split-chip")
+            self.splits_flow.append(chip)
+
+    def _on_regex_category_clicked(self, button, category: str):
+        if button.get_active():
+            self.regex_category_filter = category
+            for cat, btn in self._regex_cat_buttons.items():
+                if btn is not button and btn.get_active():
+                    btn.set_active(False)
+            self.refresh_regex_list()
+        elif self.regex_category_filter == category:
+            button.set_active(True)
+
+    def _on_save_custom_regex(self, *_):
+        title = self.regex_new_title.get_text().strip()
+        pattern = self.regex_new_pattern.get_text().strip()
+        note = self.regex_new_note.get_text().strip()
+        if not title or not pattern:
+            self.status.set_text("Enter both a title and a regex pattern.")
+            return
+        if len(pattern) > 250:
+            self.status.set_text("PoE search boxes allow at most 250 characters.")
+            return
+        self.regex_presets.append({
+            "id": f"custom-{int(time.time() * 1000)}",
+            "category": "Custom",
+            "title": title[:120],
+            "regex": pattern,
+            "note": note[:240],
+            "builtin": False,
+        })
+        try:
+            save_custom_regexes(self.regex_presets)
+        except OSError as exc:
+            self.status.set_text(f"Could not save custom regex: {exc}")
+            return
+        self.regex_new_title.set_text("")
+        self.regex_new_pattern.set_text("")
+        self.regex_new_note.set_text("")
+        self.regex_add_toggle.set_active(False)
+        self.refresh_regex_list()
+        self.status.set_text(f"Saved custom regex '{title}'.")
+
+    def _copy_regex(self, pattern: str, title: str):
+        display = Gdk.Display.get_default()
+        if display is not None:
+            display.get_clipboard().set(pattern)
+        self.status.set_text(f"Copied regex for '{title}' to clipboard ({len(pattern)} chars).")
+
+    def _delete_custom_regex(self, preset_id: str):
+        self.regex_presets = [p for p in self.regex_presets if p.get("id") != preset_id or p.get("builtin")]
+        try:
+            save_custom_regexes(self.regex_presets)
+        except OSError:
+            pass
+        self.refresh_regex_list()
+        self.status.set_text("Removed custom regex preset.")
+
+    def refresh_regex_list(self):
+        if not hasattr(self, "regex_cards_box"):
+            return
+        self._clear_box(self.regex_cards_box)
+        query = self.regex_search_entry.get_text().strip().lower() if hasattr(self, "regex_search_entry") else ""
+        cat = self.regex_category_filter
+        shown = 0
+        for preset in self.regex_presets:
+            if cat != "All" and preset.get("category") != cat:
+                continue
+            hay = f"{preset.get('title', '')} {preset.get('regex', '')} {preset.get('note', '')}".lower()
+            if query and query not in hay:
+                continue
+            shown += 1
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            card.add_css_class("regex-card")
+
+            top = Gtk.Box(spacing=8)
+            title_lbl = Gtk.Label(label=preset["title"], xalign=0, hexpand=True, wrap=True)
+            title_lbl.add_css_class("heading")
+            top.append(title_lbl)
+
+            cat_pill = Gtk.Label(label=preset.get("category", "Custom"))
+            cat_pill.add_css_class("stat-pill")
+            top.append(cat_pill)
+
+            copy_btn = Gtk.Button(label="Copy")
+            copy_btn.add_css_class("suggested-action")
+            copy_btn.connect("clicked", lambda _b, p=preset["regex"], t=preset["title"]: self._copy_regex(p, t))
+            top.append(copy_btn)
+
+            if not preset.get("builtin"):
+                del_btn = Gtk.Button(label="✕")
+                del_btn.add_css_class("destructive-subtle")
+                del_btn.add_css_class("compact-btn")
+                del_btn.set_tooltip_text("Delete custom regex")
+                del_btn.connect("clicked", lambda _b, pid=preset["id"]: self._delete_custom_regex(pid))
+                top.append(del_btn)
+            card.append(top)
+
+            code_lbl = Gtk.Label(label=preset["regex"], xalign=0, selectable=True, wrap=True)
+            code_lbl.add_css_class("regex-code")
+            card.append(code_lbl)
+
+            if preset.get("note"):
+                note_lbl = Gtk.Label(label=preset["note"], xalign=0, wrap=True)
+                note_lbl.add_css_class("planner-subtle")
+                card.append(note_lbl)
+
+            self.regex_cards_box.append(card)
+
+        if shown == 0:
+            empty = Gtk.Label(label="No matching regex presets. Click '+ Add Regex' to save your own.")
+            empty.add_css_class("planner-subtle")
+            empty.set_xalign(0); empty.set_margin_top(10); empty.set_margin_start(4)
+            self.regex_cards_box.append(empty)
+
     def change_act(self, dropdown, _pspec):
         act = dropdown.get_selected()
         if act == Gtk.INVALID_LIST_POSITION or act == self.store.data["act"]:
             return
+        prev_act = self.store.data["act"]
         self.store.data["act"], self.store.data["step"] = act, 0
+        if act > prev_act and self.run_timer.running:
+            self.run_timer.record_act_transition(prev_act, act)
+            self._refresh_splits_ui()
         self.refresh_campaign()
 
     def move_step(self, delta):
+        prev_act = self.store.data["act"]
         act, step = advance(self.campaign, self.store.data["act"], self.store.data["step"], delta)
         self.store.data["act"], self.store.data["step"] = act, step
+        if act > prev_act and self.run_timer.running:
+            self.run_timer.record_act_transition(prev_act, act)
+            self._refresh_splits_ui()
         self.campaign_act.set_selected(act)
         self.refresh_campaign()
 
@@ -1958,6 +2866,8 @@ class Companion(Gtk.Application):
                     self.hud_preview = False
                     if hasattr(self, "hud_preview_button"):
                         self.hud_preview_button.set_active(False)
+                    if hasattr(self, "header_hud_button"):
+                        self.header_hud_button.set_active(False)
             finally:
                 self._updating_hud_controls = False
             self.present_hud()
