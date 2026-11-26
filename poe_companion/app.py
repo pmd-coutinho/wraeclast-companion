@@ -447,6 +447,71 @@ class Companion(Gtk.Application):
             self.quit()
         return True
 
+    def _run_tray_action(self, action: str):
+        if action == tray.ACTION_TOGGLE_PLANNER:
+            self.toggle_planner()
+        elif action == tray.ACTION_QUIT:
+            self.quit()
+        return GLib.SOURCE_REMOVE
+
+    def _on_tray_item_call(self, _conn, _sender, _path, iface, method, params, invocation):
+        if iface == tray.PROPERTIES_INTERFACE:
+            _handle_properties_call(tray.ITEM_PROPERTIES, method, params, invocation)
+            return
+        if method in ("Activate", "SecondaryActivate", "ContextMenu", "Scroll"):
+            invocation.return_value(GLib.Variant("()", ()))
+            if method == "Activate":
+                GLib.idle_add(self._run_tray_action, tray.ACTION_TOGGLE_PLANNER)
+            return
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", f"Unknown method {method}")
+
+    def _on_tray_menu_call(self, _conn, _sender, _path, iface, method, params, invocation):
+        if iface == tray.PROPERTIES_INTERFACE:
+            _handle_properties_call(tray.MENU_PROPERTIES, method, params, invocation)
+            return
+        visible = self.planner is not None and self.planner.get_visible()
+        if method == "GetLayout":
+            parent_id, _depth, _names = params.unpack()
+            node = tray.menu_layout(visible, parent_id)
+            if node is None:
+                invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs", "Unknown menu item")
+                return
+            invocation.return_value(GLib.Variant("(u(ia{sv}av))", (self.tray_menu_revision, _menu_node_tuple(node))))
+        elif method == "GetGroupProperties":
+            ids, _names = params.unpack()
+            items = [(item_id, _dbus_props(props)) for item_id, props in tray.menu_item_properties(visible, ids)]
+            invocation.return_value(GLib.Variant("(a(ia{sv}))", (items,)))
+        elif method == "GetProperty":
+            item_id, name = params.unpack()
+            props = dict(tray.menu_item_properties(visible, [item_id])).get(item_id, {})
+            if name not in props:
+                invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs", "Unknown menu property")
+                return
+            invocation.return_value(GLib.Variant("(v)", (_dbus_value(props[name]),)))
+        elif method == "Event":
+            item_id, event_id, _data, _timestamp = params.unpack()
+            invocation.return_value(GLib.Variant("()", ()))
+            action = tray.menu_action(item_id, event_id)
+            if action is not None:
+                GLib.idle_add(self._run_tray_action, action)
+        elif method == "EventGroup":
+            events = params.unpack()[0][:tray.MAX_MENU_EVENTS]
+            errors = []
+            for item_id, event_id, _data, _timestamp in events:
+                if item_id not in tray.MENU_ITEM_IDS:
+                    errors.append(item_id)
+                    continue
+                action = tray.menu_action(item_id, event_id)
+                if action is not None:
+                    GLib.idle_add(self._run_tray_action, action)
+            invocation.return_value(GLib.Variant("(ai)", (errors,)))
+        elif method == "AboutToShow":
+            invocation.return_value(GLib.Variant("(b)", (False,)))
+        elif method == "AboutToShowGroup":
+            invocation.return_value(GLib.Variant("(aiai)", ([], [])))
+        else:
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", f"Unknown method {method}")
+
     def build_ui(self):
         self.planner = Gtk.ApplicationWindow(application=self, title="Wraeclast Companion")
         self.planner.set_default_size(1240, 820)

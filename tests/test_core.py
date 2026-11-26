@@ -9,6 +9,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from poe_companion.pob import (ImportError, _PobbinRedirectHandler, decode_share_code,
@@ -948,6 +949,93 @@ class TrayTests(unittest.TestCase):
                                            GLib.Variant("(s)", (tray.MENU_INTERFACE,)), inv)
         self.assertEqual(inv.value.unpack()[0], {"Version": 3, "TextDirection": "ltr",
                                                  "Status": "normal", "IconThemePath": []})
+
+    def test_menu_call_layout_and_events_dispatch_actions(self):
+        GLib = app_module.GLib
+        fake = SimpleNamespace(planner=None, tray_menu_revision=7, _run_tray_action=mock.Mock())
+        call = app_module.Companion._on_tray_menu_call
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "GetLayout",
+             GLib.Variant("(iias)", (0, -1, [])), inv)
+        self.assertEqual(inv.value.unpack(), (7, tray.menu_layout(False)))
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "GetLayout",
+             GLib.Variant("(iias)", (99, -1, [])), inv)
+        self.assertEqual(inv.error[0], "org.freedesktop.DBus.Error.InvalidArgs")
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "GetProperty",
+             GLib.Variant("(is)", (1, "label")), inv)
+        self.assertEqual(inv.value.unpack(), ("Show planner",))
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "Event",
+                 GLib.Variant("(isvu)", (3, "clicked", GLib.Variant("s", ""), 0)), inv)
+            idle_add.assert_called_once_with(fake._run_tray_action, "quit")
+            self.assertEqual(inv.value.unpack(), ())
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "Event",
+                 GLib.Variant("(isvu)", (2, "clicked", GLib.Variant("s", ""), 0)), inv)
+            idle_add.assert_not_called()
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "EventGroup",
+                 GLib.Variant("(a(isvu))", ([(1, "clicked", GLib.Variant("s", ""), 0),
+                                             (42, "clicked", GLib.Variant("s", ""), 0)],)), inv)
+            self.assertEqual(inv.value.unpack(), ([42],))
+            idle_add.assert_called_once_with(fake._run_tray_action, "toggle-planner")
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.MENU_PATH, tray.PROPERTIES_INTERFACE, "Get",
+             GLib.Variant("(ss)", (tray.MENU_INTERFACE, "Version")), inv)
+        self.assertEqual(inv.value.unpack(), (3,))
+
+    def test_item_call_activate_toggles_planner(self):
+        GLib = app_module.GLib
+        fake = SimpleNamespace(_run_tray_action=mock.Mock())
+        call = app_module.Companion._on_tray_item_call
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.ITEM_PATH, tray.ITEM_INTERFACE, "Activate",
+                 GLib.Variant("(ii)", (0, 0)), inv)
+            idle_add.assert_called_once_with(fake._run_tray_action, "toggle-planner")
+            self.assertEqual(inv.value.unpack(), ())
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.ITEM_PATH, tray.ITEM_INTERFACE, "ContextMenu",
+                 GLib.Variant("(ii)", (0, 0)), inv)
+            idle_add.assert_not_called()
+            self.assertEqual(inv.value.unpack(), ())
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.ITEM_PATH, tray.ITEM_INTERFACE, "Boom", GLib.Variant("()", ()), inv)
+        self.assertEqual(inv.error[0], "org.freedesktop.DBus.Error.UnknownMethod")
+
+    def test_run_tray_action_toggles_and_quits(self):
+        fake = SimpleNamespace(toggle_planner=mock.Mock(), quit=mock.Mock())
+        run = app_module.Companion._run_tray_action
+
+        self.assertEqual(run(fake, "toggle-planner"), app_module.GLib.SOURCE_REMOVE)
+        fake.toggle_planner.assert_called_once_with()
+        fake.quit.assert_not_called()
+
+        fake.toggle_planner.reset_mock()
+        run(fake, "quit")
+        fake.quit.assert_called_once_with()
+        fake.toggle_planner.assert_not_called()
+
+        fake.quit.reset_mock()
+        run(fake, "other")
+        fake.quit.assert_not_called()
+        fake.toggle_planner.assert_not_called()
 
 
 if __name__ == "__main__":
