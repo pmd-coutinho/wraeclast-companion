@@ -47,6 +47,7 @@ from .client_log import ClientLogTailer, discover_client_log, match_campaign_ste
 from .tools import (RunTimer, compute_tree_diff, format_duration, gem_socket_color,
                     generate_build_vendor_regex, is_support_gem, level_milestone_cue,
                     load_regex_presets, next_level_milestone, parse_item_card, save_custom_regexes)
+from . import tray
 
 APP_ID = "org.poecompanion.Companion"
 DATA = Path.home() / ".local/share/poe-companion"
@@ -290,6 +291,44 @@ def notify(message: str) -> bool:
     except OSError as e:
         print(f"PoE Companion is not running ({e})", file=sys.stderr)
         return False
+
+
+def _dbus_value(value) -> GLib.Variant:
+    if isinstance(value, bool):
+        return GLib.Variant("b", value)
+    if isinstance(value, int):
+        return GLib.Variant("i", value)
+    return GLib.Variant("s", str(value))
+
+
+def _dbus_props(props: dict) -> dict:
+    return {key: _dbus_value(value) for key, value in props.items()}
+
+
+def _menu_node_tuple(node: tuple) -> tuple:
+    item_id, props, children = node
+    return (item_id, _dbus_props(props),
+            [GLib.Variant("(ia{sv}av)", _menu_node_tuple(child)) for child in children])
+
+
+def _property_variants(properties: dict) -> dict:
+    return {name: GLib.Variant(signature, value) for name, (signature, value) in properties.items()}
+
+
+def _handle_properties_call(properties: dict, method: str, params, invocation):
+    if method == "Get":
+        _interface, name = params.unpack()
+        spec = properties.get(name)
+        if spec is None:
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownProperty", f"Unknown property {name}")
+            return
+        invocation.return_value(GLib.Variant("(v)", (GLib.Variant(spec[0], spec[1]),)))
+    elif method == "GetAll":
+        invocation.return_value(GLib.Variant("(a{sv})", (_property_variants(properties),)))
+    elif method == "Set":
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.PropertyReadOnly", "Tray properties are read-only")
+    else:
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", f"Unknown method {method}")
 
 
 class Companion(Gtk.Application):

@@ -835,6 +835,18 @@ class ToolsAndQoLTests(unittest.TestCase):
         self.assertEqual(app_module.compact_step_summary("First sentence. Second sentence."), "First sentence.")
 
 
+class _FakeInvocation:
+    def __init__(self):
+        self.value = None
+        self.error = None
+
+    def return_value(self, value):
+        self.value = value
+
+    def return_dbus_error(self, name, message):
+        self.error = (name, message)
+
+
 class TrayTests(unittest.TestCase):
     def test_toggle_label_and_menu_layout(self):
         self.assertEqual(tray.toggle_label(True), "Hide planner")
@@ -896,6 +908,46 @@ class TrayTests(unittest.TestCase):
         source = (ROOT / "poe_companion/tray.py").read_text()
         self.assertNotIn("import gi", source)
         self.assertNotIn("from gi", source)
+
+    def test_menu_layout_variant_round_trips(self):
+        v = app_module.GLib.Variant("(u(ia{sv}av))", (5, app_module._menu_node_tuple(tray.menu_layout(True))))
+        self.assertEqual(v.get_type_string(), "(u(ia{sv}av))")
+        self.assertEqual(v.unpack(), (5, tray.menu_layout(True)))
+
+    def test_interface_xml_parses_with_gio(self):
+        item = app_module.Gio.DBusNodeInfo.new_for_xml(tray.ITEM_INTERFACE_XML)
+        self.assertEqual(item.interfaces[0].name, "org.kde.StatusNotifierItem")
+        menu = app_module.Gio.DBusNodeInfo.new_for_xml(tray.MENU_INTERFACE_XML)
+        self.assertEqual(menu.interfaces[0].name, "com.canonical.dbusmenu")
+
+    def test_properties_get_getall_and_set(self):
+        GLib = app_module.GLib
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.ITEM_PROPERTIES, "Get",
+                                           GLib.Variant("(ss)", (tray.ITEM_INTERFACE, "IconName")), inv)
+        self.assertEqual(inv.value.unpack(), ("applications-games",))
+
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.ITEM_PROPERTIES, "GetAll",
+                                           GLib.Variant("(s)", (tray.ITEM_INTERFACE,)), inv)
+        self.assertEqual(inv.value.unpack()[0]["ToolTip"], ("applications-games", [], "Wraeclast Companion", ""))
+
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.ITEM_PROPERTIES, "Get",
+                                           GLib.Variant("(ss)", (tray.ITEM_INTERFACE, "Nope")), inv)
+        self.assertEqual(inv.error[0], "org.freedesktop.DBus.Error.UnknownProperty")
+
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.ITEM_PROPERTIES, "Set",
+                                           GLib.Variant("(ssv)", (tray.ITEM_INTERFACE, "IconName",
+                                                                  GLib.Variant("s", "x"))), inv)
+        self.assertEqual(inv.error[0], "org.freedesktop.DBus.Error.PropertyReadOnly")
+
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.MENU_PROPERTIES, "GetAll",
+                                           GLib.Variant("(s)", (tray.MENU_INTERFACE,)), inv)
+        self.assertEqual(inv.value.unpack()[0], {"Version": 3, "TextDirection": "ltr",
+                                                 "Status": "normal", "IconThemePath": []})
 
 
 if __name__ == "__main__":
