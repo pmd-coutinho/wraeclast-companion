@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""The deterministic gate: does the job's branch pass the repo's checks?
+
+Usage:
+  gate <job-id>            write round-N/checks.md; exit 0 on PASS, 1 on FAIL
+
+The gate runs the main checkout's factory/checks.sh inside the job's worktree,
+so a branch can't change the checks it is judged by. It fails when:
+- the worktree has uncommitted or untracked changes,
+- the branch adds, modifies, renames, or deletes any path matching
+  config.json `protected_paths` (fnmatch patterns, where `*` also matches `/`),
+- `checks.sh` exits non-zero or exceeds `gate_timeout_seconds`.
+"""
+
+import fnmatch
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+FACTORY = REPO / "factory"
+CONFIG = json.loads((FACTORY / "config.json").read_text())
+CHECKS = FACTORY / "checks.sh"
+TAIL = 80
+DEFAULT_TIMEOUT = 600
+
+
+def die(msg):
+    print(f"gate: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def log_event(job_dir, event_type, **fields):
+    entry = {"ts": now(), "event": event_type, **fields}
+    with (job_dir / "events.jsonl").open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def git(worktree, *args, check=True):
+    res = subprocess.run(["git", *args], cwd=worktree, capture_output=True, text=True)
+    if check and res.returncode != 0:
+        die(f"`git {' '.join(args)}` failed: {res.stderr.strip()}")
+    return res
+
+
+def dirty_files(worktree):
+    out = git(worktree, "status", "--porcelain").stdout
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def protected_changes(worktree):
+    """Any file matching protected_paths that the branch added, modified, renamed, or deleted."""
+    base_ref = f"origin/{CONFIG['base_branch']}"
+    diff = git(worktree, "diff", "--name-status", f"{base_ref}...HEAD").stdout
+    hits = []
+    patterns = CONFIG.get("protected_paths", [])
+    for line in diff.splitlines():
+        if not line.strip():
+            continue
+        status, *paths = line.split("\t")
+        for p in paths:
+            if any(fnmatch.fnmatch(p, pattern) for pattern in patterns):
+                hits.append(f"{status[0]} {p}")
+    return hits
+
+
+def commits_behind_base(worktree):
+    base_ref = f"origin/{CONFIG['base_branch']}"
+    res = git(worktree, "rev-list", "--count", f"HEAD..{base_ref}", check=False)
+    if res.returncode != 0:
+        return None
+    try:
+        return int(res.stdout.strip())
+    except ValueError:
+        return None
+
+
+def run_checks(worktree, timeout):
+    start = time.monotonic()
+    proc = subprocess.Popen(
+        ["bash", str(CHECKS)],
+        cwd=worktree,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            out, _ = proc.communicate(timeout=5)
+        except Exception:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                pass
+            out, _ = proc.communicate()
+        code = 124
+        out = (out or "") + f"\n[gate] checks.sh timed out after {timeout}s and was terminated.\n"
+    return code, out or "", int(time.monotonic() - start), timed_out
+
+
+def gate(job_id):
+    job_dir = FACTORY / "jobs" / job_id
+    job = json.loads((job_dir / "job.json").read_text())
+    worktree = job["worktree"]
+    if job["round"] < 1:
+        die(f"{job_id} hasn't started a build round")
+    round_dir = job_dir / f"round-{job['round']}"
+    round_dir.mkdir(exist_ok=True)
+
+    # Best-effort fetch so protected_paths diff and behind-base count use fresh origin/<base>.
+    fetch_res = git(worktree, "fetch", "origin", CONFIG["base_branch"], check=False)
+    fetch_warn = None if fetch_res.returncode == 0 else (fetch_res.stderr or "").strip()
+
+    commit = git(worktree, "rev-parse", "HEAD").stdout.strip()
+    dirty = dirty_files(worktree)
+    protected = protected_changes(worktree)
+    behind = commits_behind_base(worktree)
+    timeout = CONFIG.get("gate_timeout_seconds", DEFAULT_TIMEOUT)
+
+    if dirty:
+        code, log, seconds, timed_out = 1, "Skipped checks.sh: worktree has uncommitted or untracked changes:\n" + "\n".join(dirty) + "\n", 0, False
+    else:
+        code, log, seconds, timed_out = run_checks(worktree, timeout)
+
+    verdict = "PASS" if (code == 0 and not protected and not dirty and not timed_out) else "FAIL"
+    (round_dir / "checks.log").write_text(log)
+    tail = "\n".join(log.rstrip().splitlines()[-TAIL:])
+
+    check_line = (
+        f"checks.sh skipped (dirty worktree: {len(dirty)} file(s))" if dirty
+        else f"checks.sh timed out after {timeout}s" if timed_out
+        else f"checks.sh {'passed' if code == 0 else f'failed with exit {code}'} in {seconds}s"
+    )
+    summary = [
+        check_line,
+        f"Protected paths: {'changed: ' + ', '.join(protected) if protected else 'none changed'}",
+        f"Worktree: {'dirty (' + str(len(dirty)) + ' file(s))' if dirty else 'clean'} · Commit {commit[:7]}"
+        + (f" ({behind} commit(s) behind origin/{CONFIG['base_branch']})" if behind else ""),
+    ]
+    if fetch_warn:
+        summary.append(f"Warning: git fetch origin/{CONFIG['base_branch']} failed (used local tracking ref)")
+
+    (round_dir / "checks.md").write_text(
+        f"GATE: {verdict}\nCOMMIT: {commit}\nROUND: {job['round']}\n\n"
+        "## Summary\n" + "\n".join(f"- {s}" for s in summary) + "\n\n"
+        "## Worktree\n"
+        + ("\n".join(f"- `{d}`" for d in dirty) if dirty else "Clean.")
+        + "\n\n## Protected paths\n"
+        + ("\n".join(f"- {p}" for p in protected) if protected else "None changed.")
+        + f"\n\n## checks.sh\nExit {code} in {seconds}s"
+        + (" (TIMED OUT)" if timed_out else "")
+        + f". Last {TAIL} lines of checks.log:\n\n```\n{tail}\n```\n"
+    )
+    log_event(
+        job_dir,
+        "gate",
+        round=job["round"],
+        verdict=verdict,
+        exit_code=code,
+        duration_s=seconds,
+        timed_out=timed_out,
+        dirty_count=len(dirty),
+        protected_hits=protected,
+        behind_base=behind,
+        commit=commit[:12],
+    )
+    reasons = []
+    if dirty:
+        reasons.append(f"dirty worktree ({len(dirty)} file(s))")
+    elif timed_out:
+        reasons.append(f"checks.sh timed out after {timeout}s")
+    else:
+        reasons.append(f"checks.sh exit {code} in {seconds}s")
+    if protected:
+        reasons.append(f"protected paths changed: {', '.join(protected)}")
+    print(f"GATE: {verdict} ({job_id} round {job['round']}, {', '.join(reasons)})")
+    sys.exit(0 if verdict == "PASS" else 1)
+
+
+def main(argv):
+    if len(argv) == 1 and not argv[0].startswith("-"):
+        gate(argv[0])
+    else:
+        die(__doc__.strip())
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
