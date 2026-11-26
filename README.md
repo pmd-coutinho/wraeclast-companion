@@ -38,6 +38,12 @@ A native Linux/Wayland Path of Exile 1 build desk, passive skill tree viewer, an
 - **Live HUD settings & Preview:** configure enable/disable, compact bar, clickable mini-buttons, HUD timer, screen position (`Top center`, `Top right`, `Top left`, `Bottom center`, `Bottom left`), opacity, `Client.txt` auto-tracking, and **Preview HUD** (persisted in `~/.config/poe-companion/hud.json`).
 - **Optional CLI hotkeys** (instant local socket dispatch): `--next-step`, `--prev-step`, `--toggle-compact`, `--toggle-hud`, and `--toggle-clickable`.
 
+### System Tray Icon
+- Adds a **Wraeclast Companion** icon (`applications-games`) to any StatusNotifierItem tray (KDE Plasma's system tray, waybar's `tray` module on niri, and others) over the session D-Bus. No extra packages needed.
+- **Left-click** shows or hides the planner window. The **right-click menu** offers **Show planner** / **Hide planner** and **Quit**.
+- While the planner is hidden the app keeps running, and the in-game HUD works as usual.
+- If your desktop has no tray, nothing changes. If a tray starts later (for example waybar), the icon appears there automatically.
+
 ---
 
 ## Quick Install
