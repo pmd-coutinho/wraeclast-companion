@@ -402,11 +402,13 @@ class Companion(Gtk.Application):
             self.build_ui()
             self.start_control_socket()
             self.start_compositor_tracker()
+            self.start_tray()
         self.planner.present()
         if self.store.read_only_reason:
             self.status.set_text(self.store.read_only_reason)
 
     def do_shutdown(self):
+        self.stop_tray()
         if self.dbus_owner_id:
             try:
                 Gio.bus_unown_name(self.dbus_owner_id)
@@ -511,6 +513,78 @@ class Companion(Gtk.Application):
             invocation.return_value(GLib.Variant("(aiai)", ([], [])))
         else:
             invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", f"Unknown method {method}")
+
+    def start_tray(self):
+        try:
+            connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            item_info = Gio.DBusNodeInfo.new_for_xml(tray.ITEM_INTERFACE_XML).interfaces[0]
+            menu_info = Gio.DBusNodeInfo.new_for_xml(tray.MENU_INTERFACE_XML).interfaces[0]
+            self.tray_connection = connection
+            self.tray_registration_ids.append(
+                connection.register_object(tray.ITEM_PATH, item_info, self._on_tray_item_call, None, None))
+            self.tray_registration_ids.append(
+                connection.register_object(tray.MENU_PATH, menu_info, self._on_tray_menu_call, None, None))
+            self.tray_bus_name = tray.item_bus_name(os.getpid())
+            self.tray_owner_id = Gio.bus_own_name_on_connection(
+                connection, self.tray_bus_name, Gio.BusNameOwnerFlags.NONE, self._on_tray_name_acquired, None)
+        except Exception as exc:
+            print(f"Tray icon unavailable: {exc}", file=sys.stderr)
+            self.stop_tray()
+            return
+        self.planner.connect("notify::visible", self._on_planner_visibility_changed)
+
+    def _on_tray_name_acquired(self, connection, _name):
+        if self.tray_watch_id == 0:
+            try:
+                self.tray_watch_id = Gio.bus_watch_name_on_connection(
+                    connection, tray.WATCHER_NAME, Gio.BusNameWatcherFlags.NONE,
+                    self._on_tray_watcher_appeared, None)
+            except Exception as exc:
+                print(f"Tray icon unavailable: {exc}", file=sys.stderr)
+
+    def _on_tray_watcher_appeared(self, connection, _name, _owner):
+        # Runs each time the watcher appears, so a host started later (or restarted) gets the icon.
+        connection.call(tray.WATCHER_NAME, tray.WATCHER_PATH, tray.WATCHER_INTERFACE,
+                        "RegisterStatusNotifierItem", GLib.Variant("(s)", (self.tray_bus_name,)),
+                        None, Gio.DBusCallFlags.NO_AUTO_START, 2000, None, self._on_tray_registered)
+
+    def _on_tray_registered(self, connection, result):
+        try:
+            connection.call_finish(result)
+        except GLib.Error as exc:
+            print(f"Tray host did not accept the tray icon: {exc.message}", file=sys.stderr)
+
+    def _on_planner_visibility_changed(self, *_):
+        self.tray_menu_revision = self.tray_menu_revision % 2_000_000_000 + 1
+        if self.tray_connection is None:
+            return
+        try:
+            self.tray_connection.emit_signal(None, tray.MENU_PATH, tray.MENU_INTERFACE, "LayoutUpdated",
+                                             GLib.Variant("(ui)", (self.tray_menu_revision, tray.MENU_ROOT_ID)))
+        except GLib.Error as exc:
+            print(f"Could not update the tray menu: {exc.message}", file=sys.stderr)
+
+    def stop_tray(self):
+        if self.tray_watch_id:
+            try:
+                Gio.bus_unwatch_name(self.tray_watch_id)
+            except Exception:
+                pass
+            self.tray_watch_id = 0
+        if self.tray_owner_id:
+            try:
+                Gio.bus_unown_name(self.tray_owner_id)
+            except Exception:
+                pass
+            self.tray_owner_id = 0
+        if self.tray_connection is not None:
+            for reg_id in self.tray_registration_ids:
+                try:
+                    self.tray_connection.unregister_object(reg_id)
+                except Exception:
+                    pass
+        self.tray_registration_ids = []
+        self.tray_connection = None
 
     def build_ui(self):
         self.planner = Gtk.ApplicationWindow(application=self, title="Wraeclast Companion")
