@@ -342,6 +342,12 @@ class Companion(Gtk.Application):
         self.niri_tracker = False
         self.last_focus_update = 0.0
         self.dbus_owner_id = 0
+        self.tray_connection = None
+        self.tray_bus_name = ""
+        self.tray_owner_id = 0
+        self.tray_watch_id = 0
+        self.tray_registration_ids = []
+        self.tray_menu_revision = 1
         self.planner = None
         self.hud = None
         self.hud_css = None
@@ -413,11 +419,40 @@ class Companion(Gtk.Application):
             pass
         Gtk.Application.do_shutdown(self)
 
+    def show_planner(self):
+        if self.planner is None:
+            return
+        self.planner.present()
+
+    def hide_planner(self):
+        if self.planner is None:
+            return
+        if self.import_dialog is not None:
+            self.import_dialog.close()
+        self.planner.set_visible(False)
+
+    def toggle_planner(self):
+        if self.planner is None:
+            return
+        if self.planner.get_visible():
+            self.hide_planner()
+        else:
+            self.show_planner()
+
+    def _on_planner_close_request(self, _window):
+        # Keep the window object alive so the tray (or a relaunch) can show it again.
+        # Without a HUD window nothing else keeps the app alive today, so quit as before.
+        self.hide_planner()
+        if self.hud is None:
+            self.quit()
+        return True
+
     def build_ui(self):
         self.planner = Gtk.ApplicationWindow(application=self, title="Wraeclast Companion")
         self.planner.set_default_size(1240, 820)
         self.planner.set_size_request(760, 560)
         self.planner.add_css_class("planner-window")
+        self.planner.connect("close-request", self._on_planner_close_request)
 
         # Modern integrated client-side HeaderBar
         headerbar = Gtk.HeaderBar()
