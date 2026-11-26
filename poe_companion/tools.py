@@ -306,3 +306,137 @@ class RunTimer:
 
     def formatted(self) -> str:
         return format_duration(self.elapsed())
+
+
+LEVEL_MILESTONES: dict[int, tuple[str, str]] = {
+    4: ("Nessa (Act 1)", "Movement skills & early utility gems unlocked — grab a Quicksilver Flask too."),
+    8: ("Nessa (Act 1)", "First support gems unlocked — link them to your main skill."),
+    10: ("Nessa (Act 1)", "Check Nessa for movement speed boots and 3-link items."),
+    12: ("Nessa (Act 1)", "Act 1 main skills unlocked (after Cavern of Wrath) — big power spike!"),
+    16: ("Yeena (Act 2)", "Heralds & Act 2 skills unlocked after Intruders in Black."),
+    18: ("Yeena (Act 2)", "Key Act 2 support gems unlocked after The Weaver's Chambers."),
+    24: ("Clarissa (Act 3)", "Auras & curses unlocked — check Clarissa after Lost in Love."),
+    28: ("Clarissa (Act 3)", "Act 3 main skills unlocked after Sever the Right Hand — look for a 4-link."),
+    31: ("Siosa (Act 3 Library)", "Library support gems unlocked — huge damage upgrade!"),
+    34: ("Petarus & Vanja (Act 4)", "Golems & Act 4 skills unlocked."),
+    38: ("Petarus & Vanja (Act 4)", "Endgame support gems (Multistrike, Spell Echo, GMP, etc.) unlocked."),
+    45: ("Labyrinth", "Good level to run Normal/Cruel Labyrinth for your next Ascendancy points."),
+    55: ("Lilly Roth (Act 6)", "Lilly sells almost every gem — fix your 4-link and cap resistances at Crafting Bench."),
+    68: ("Merciless Lab / Maps", "Run Merciless Lab before Act 10 Kitava, then cap 75% resists for maps."),
+}
+
+_ACT_VENDORS = {
+    1: "Nessa",
+    2: "Yeena",
+    3: "Clarissa / Siosa",
+    4: "Petarus & Vanja",
+    5: "Lani",
+}
+
+
+def _active_build_gem_names(build: dict | None) -> list[str]:
+    if not build:
+        return []
+    selected_id = build.get("selected_skill_set", build.get("active_skill_set", ""))
+    skill_set = next((s for s in build.get("skill_sets", []) if s.get("id") == selected_id), None)
+    groups = skill_set.get("groups", []) if skill_set else build.get("groups", [])
+    names: list[str] = []
+    seen: set[str] = set()
+    for group in groups:
+        for gem in group.get("gems", []):
+            clean = gem.split(" (Lv")[0].strip()
+            if clean and clean.lower() not in seen:
+                seen.add(clean.lower())
+                names.append(clean)
+    return names
+
+
+def level_milestone_cue(level: int, build: dict | None = None, act_number: int = 1) -> str | None:
+    """Return a concise hand-hold alert string when hitting a PoE leveling breakpoint."""
+    entry = LEVEL_MILESTONES.get(level)
+    if entry is None:
+        return None
+    vendor, tip = entry
+    gems = _active_build_gem_names(build)
+    if gems and level in (4, 8, 12, 16, 18, 24, 28, 31, 34, 38, 55):
+        preview = ", ".join(gems[:3])
+        return f"Lv {level} · {vendor}: {tip} (Build gems: {preview})"
+    return f"Lv {level} · {vendor}: {tip}"
+
+
+def next_level_milestone(level: int) -> tuple[int, str] | None:
+    for lvl in sorted(LEVEL_MILESTONES):
+        if lvl > level:
+            vendor, tip = LEVEL_MILESTONES[lvl]
+            return lvl, f"{vendor} — {tip}"
+    return None
+
+
+def _color_letter(color: str) -> str:
+    return {"red": "r", "green": "g", "blue": "b"}.get(color, "")
+
+
+def _unique_link_patterns(letters: list[str]) -> list[str]:
+    """Return deduplicated hyphenated socket-link permutations for 3- or 4-link vendor search."""
+    from itertools import permutations
+    seen: set[str] = set()
+    out: list[str] = []
+    for perm in permutations(letters):
+        pat = "-".join(perm)
+        if pat not in seen:
+            seen.add(pat)
+            out.append(pat)
+    return out
+
+
+def generate_build_vendor_regex(build: dict | None) -> dict | None:
+    """Auto-generate a PoE vendor search regex (<= 250 chars) from the active build's socket colors."""
+    if not build:
+        return None
+    selected_id = build.get("selected_skill_set", build.get("active_skill_set", ""))
+    skill_set = next((s for s in build.get("skill_sets", []) if s.get("id") == selected_id), None)
+    groups = skill_set.get("groups", []) if skill_set else build.get("groups", [])
+    if not groups:
+        return None
+
+    # Sort groups by gem count descending so the main skill setup comes first.
+    ranked = sorted((g for g in groups if g.get("gems")), key=lambda g: len(g.get("gems", [])), reverse=True)
+    tokens: list[str] = ["nne", "rint"]  # Runner's / Sprinter's movement speed boots
+    color_summaries: list[str] = []
+    seen_tokens: set[str] = set(tokens)
+
+    for group in ranked[:2]:
+        gems = group.get("gems", [])
+        letters = [_color_letter(gem_socket_color(g)) for g in gems[:4]]
+        letters = [c for c in letters if c]
+        if len(letters) < 3:
+            continue
+        # Use 3-link prefix for early leveling (always fits comfortably within 250 chars).
+        three = letters[:3]
+        summary = "-".join(c.upper() for c in three)
+        if summary not in color_summaries:
+            color_summaries.append(summary)
+        for pat in _unique_link_patterns(three):
+            if pat not in seen_tokens:
+                candidate = "|".join(tokens + [pat])
+                if len(candidate) <= 245:
+                    tokens.append(pat)
+                    seen_tokens.add(pat)
+
+    if len(tokens) <= 2:
+        # Fallback if all groups have < 3 gems: still offer MS boots + any 3-link
+        tokens.append(".-.-")
+        color_summaries.append("Any 3L")
+
+    regex = "|".join(tokens)
+    build_name = build.get("name") or "Active build"
+    colors_text = " / ".join(color_summaries)
+    return {
+        "id": "build-auto-regex",
+        "category": "Build",
+        "title": f"{build_name} · Leveling Vendor ({colors_text} + MS Boots)",
+        "regex": regex,
+        "note": f"Auto-generated from your active skill set's main gem colors ({colors_text}) plus Runner's/Sprinter's movement speed boots.",
+        "builtin": True,
+    }
+

@@ -778,6 +778,58 @@ class ToolsAndQoLTests(unittest.TestCase):
             reloaded = load_regex_presets(path)
             self.assertEqual(len(reloaded), builtin_count + 1)
             self.assertEqual(reloaded[-1]["title"], "My Boots")
+
+    def test_level_up_parsing_milestones_and_auto_build_regex(self):
+        from poe_companion.client_log import parse_level_up
+        from poe_companion.tools import generate_build_vendor_regex, level_milestone_cue, next_level_milestone
+
+        self.assertEqual(
+            parse_level_up("2026/03/15 14:25:01 1234 cff9 [INFO Client 1] : ExileOne (Witch) is now level 12\n"),
+            ("ExileOne", 12),
+        )
+        self.assertIsNone(parse_level_up("2026/03/15 14:25:01 [INFO Client 1] : Random chat line\n"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = Path(directory) / "Client.txt"
+            log_path.write_text("", encoding="utf-8")
+            tailer = ClientLogTailer(log_path)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write("2026/03/15 14:26:00 [INFO Client 1] : You have entered The Mud Flats.\n")
+                handle.write("2026/03/15 14:26:10 [INFO Client 1] : ExileOne (Witch) is now level 12\n")
+            zones, levels = tailer.poll_events()
+            self.assertEqual(zones, ["The Mud Flats"])
+            self.assertEqual(levels, [("ExileOne", 12)])
+
+        build = {
+            "name": "RF Chieftain",
+            "groups": [
+                {"label": "Main", "gems": ["Righteous Fire (Lv 20)", "Elemental Focus Support (Lv 20)", "Lifetap Support (Lv 20)"]}
+            ],
+        }
+        cue = level_milestone_cue(12, build)
+        self.assertIsNotNone(cue)
+        self.assertIn("Nessa", cue)
+        self.assertIn("Righteous Fire", cue)
+        self.assertIsNone(level_milestone_cue(13, build))
+        self.assertEqual(next_level_milestone(12)[0], 16)
+
+        auto_rx = generate_build_vendor_regex(build)
+        self.assertIsNotNone(auto_rx)
+        self.assertLessEqual(len(auto_rx["regex"]), 250)
+        self.assertIn("nne|rint", auto_rx["regex"])
+        self.assertIn("b-b-r", auto_rx["regex"])
+
+    def test_campaign_hand_hold_metadata_complete(self):
+        acts = json.loads((ROOT / "poe_companion/campaign.json").read_text())
+        for act in acts:
+            target = act.get("target")
+            self.assertIsInstance(target, dict)
+            self.assertTrue(target.get("life"))
+            self.assertTrue(target.get("resists"))
+            self.assertTrue(target.get("note"))
+            for step in act["steps"]:
+                self.assertTrue((step.get("layout") or "").strip(), f"Missing layout tell for {step['title']}")
+                self.assertIsInstance(step.get("tags"), list)
         self.assertEqual(app_module.compact_step_summary("First sentence. Second sentence."), "First sentence.")
 
 

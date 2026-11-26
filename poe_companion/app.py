@@ -45,7 +45,8 @@ from .policy import advance, is_game_focus, toggle_clickable
 from .tree_canvas import PassiveTreeCanvas
 from .client_log import ClientLogTailer, discover_client_log, match_campaign_step
 from .tools import (RunTimer, compute_tree_diff, format_duration, gem_socket_color,
-                    is_support_gem, load_regex_presets, parse_item_card, save_custom_regexes)
+                    generate_build_vendor_regex, is_support_gem, level_milestone_cue,
+                    load_regex_presets, next_level_milestone, parse_item_card, save_custom_regexes)
 
 APP_ID = "org.poecompanion.Companion"
 DATA = Path.home() / ".local/share/poe-companion"
@@ -347,6 +348,9 @@ class Companion(Gtk.Application):
         self.import_dialog = None
         self.import_status_label = None
         self._loadout_filter_query = ""
+        self.detected_level = None
+        self.detected_char = ""
+        self._milestone_timer_id = None
 
     def do_activate(self):
         if self.planner is None:
@@ -563,6 +567,34 @@ class Companion(Gtk.Application):
                 border-left: 3px solid #dca74c;
                 border-radius: 8px;
                 padding: 12px 14px;
+            }
+            .layout-callout {
+                background: #102028;
+                border: 1px solid #214453;
+                border-left: 3px solid #3ec8d8;
+                border-radius: 8px;
+                padding: 10px 14px;
+            }
+            .layout-text { color: #bfeef5; font-size: 13px; }
+            .step-tag {
+                border-radius: 12px;
+                padding: 2px 9px;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            .tag-passive { background: #2d2411; color: #f6ce74; border: 1px solid #6b5220; }
+            .tag-trial { background: #241936; color: #cfa2ff; border: 1px solid #543782; }
+            .tag-resist { background: #331919; color: #ff9a8a; border: 1px solid #753434; }
+            .tag-vendor { background: #132c29; color: #67e6d2; border: 1px solid #25645c; }
+            .tag-bench { background: #15253b; color: #8ac2ff; border: 1px solid #2d517f; }
+            .milestone-banner {
+                background: #152b1f;
+                color: #82f0ae;
+                border: 1px solid #2b6644;
+                border-radius: 8px;
+                padding: 8px 12px;
+                font-size: 12.5px;
+                font-weight: 600;
             }
             .context-card {
                 background: #0e1520;
@@ -1342,6 +1374,25 @@ class Companion(Gtk.Application):
         self.step_label.set_xalign(0); self.step_label.add_css_class("title-2"); self.step_label.set_wrap(True)
         step_card.append(self.step_label)
 
+        self.step_tags_box = Gtk.Box(spacing=6)
+        self.step_tags_box.set_visible(False)
+        step_card.append(self.step_tags_box)
+
+        self.milestone_banner = Gtk.Label(wrap=True, selectable=True)
+        self.milestone_banner.set_xalign(0)
+        self.milestone_banner.add_css_class("milestone-banner")
+        self.milestone_banner.set_visible(False)
+        step_card.append(self.milestone_banner)
+
+        self.layout_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.layout_box.add_css_class("layout-callout")
+        layout_kicker = Gtk.Label(label="WHERE TO GO (ZONE LAYOUT TELL)")
+        layout_kicker.add_css_class("section-kicker"); layout_kicker.set_xalign(0); self.layout_box.append(layout_kicker)
+        self.layout_label = Gtk.Label(wrap=True, selectable=True)
+        self.layout_label.set_xalign(0); self.layout_label.add_css_class("layout-text")
+        self.layout_box.append(self.layout_label)
+        step_card.append(self.layout_box)
+
         self.detail_label = Gtk.Label(wrap=True, selectable=True)
         self.detail_label.set_xalign(0); self.detail_label.set_wrap(True)
         step_card.append(self.detail_label)
@@ -1356,10 +1407,45 @@ class Companion(Gtk.Application):
         step_card.append(tip_box)
         right_box.append(step_card)
 
+        # Act Survival Target & Level Breakpoint card
+        target_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=7)
+        target_card.add_css_class("context-card")
+        target_head = Gtk.Box(spacing=10)
+        target_kicker = Gtk.Label(label="ACT SURVIVAL TARGETS & BREAKPOINTS")
+        target_kicker.add_css_class("section-kicker"); target_kicker.set_xalign(0); target_kicker.set_hexpand(True)
+        target_head.append(target_kicker)
+        self.level_status_label = Gtk.Label(label="Level: auto-detected from Client.txt")
+        self.level_status_label.add_css_class("planner-subtle")
+        target_head.append(self.level_status_label)
+        target_card.append(target_head)
+
+        target_pills = Gtk.Box(spacing=8)
+        self.act_target_life = Gtk.Label(label="")
+        self.act_target_life.add_css_class("stat-pill")
+        target_pills.append(self.act_target_life)
+        self.act_target_resists = Gtk.Label(label="")
+        self.act_target_resists.add_css_class("stat-pill")
+        self.act_target_resists.add_css_class("stat-pill-gold")
+        target_pills.append(self.act_target_resists)
+        target_card.append(target_pills)
+
+        self.act_target_note = Gtk.Label(wrap=True, selectable=True)
+        self.act_target_note.set_xalign(0); self.act_target_note.add_css_class("planner-subtle")
+        target_card.append(self.act_target_note)
+        right_box.append(target_card)
+
         ctx_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         ctx_card.add_css_class("context-card")
+        ctx_head = Gtk.Box(spacing=10)
         ctx_kicker = Gtk.Label(label="ACTIVE BUILD CONTEXT")
-        ctx_kicker.add_css_class("section-kicker"); ctx_kicker.set_xalign(0); ctx_card.append(ctx_kicker)
+        ctx_kicker.add_css_class("section-kicker"); ctx_kicker.set_xalign(0); ctx_kicker.set_hexpand(True)
+        ctx_head.append(ctx_kicker)
+        self.copy_build_regex_btn = Gtk.Button(label="Copy Build Vendor Regex")
+        self.copy_build_regex_btn.set_tooltip_text("Copy a vendor search regex matching your build's socket colors + movement speed boots")
+        self.copy_build_regex_btn.connect("clicked", self._on_copy_build_vendor_regex)
+        self.copy_build_regex_btn.set_visible(False)
+        ctx_head.append(self.copy_build_regex_btn)
+        ctx_card.append(ctx_head)
         self.context_label = Gtk.Label(wrap=True, selectable=True)
         self.context_label.set_xalign(0); self.context_label.set_wrap(True); self.context_label.add_css_class("planner-subtle")
         ctx_card.append(self.context_label)
@@ -1464,7 +1550,7 @@ class Companion(Gtk.Application):
         toolbar.append(self.regex_search_entry)
 
         self._regex_cat_buttons = {}
-        for cat in ("All", "Leveling", "Vendors", "Gear", "Endgame", "Custom"):
+        for cat in ("All", "Build", "Leveling", "Vendors", "Gear", "Endgame", "Custom"):
             btn = Gtk.ToggleButton(label=cat)
             btn.add_css_class("nav-pill-btn")
             btn.set_active(cat == "All")
@@ -1583,10 +1669,26 @@ class Companion(Gtk.Application):
             self.hud_progress.set_show_text(False)
             box.append(self.hud_progress)
 
+            self.hud_milestone = Gtk.Label()
+            self.hud_milestone.add_css_class("hud-milestone"); self.hud_milestone.set_xalign(0)
+            self.hud_milestone.set_wrap(True); self.hud_milestone.set_max_width_chars(56)
+            self.hud_milestone.set_visible(False)
+            box.append(self.hud_milestone)
+
             self.hud_title = Gtk.Label()
             self.hud_title.add_css_class("hud-title"); self.hud_title.set_xalign(0)
             self.hud_title.set_wrap(True); self.hud_title.set_max_width_chars(52)
             box.append(self.hud_title)
+
+            self.hud_tags_box = Gtk.Box(spacing=4)
+            self.hud_tags_box.set_visible(False)
+            box.append(self.hud_tags_box)
+
+            self.hud_layout_label = Gtk.Label()
+            self.hud_layout_label.add_css_class("hud-layout"); self.hud_layout_label.set_xalign(0)
+            self.hud_layout_label.set_wrap(True); self.hud_layout_label.set_max_width_chars(56)
+            self.hud_layout_label.set_visible(False)
+            box.append(self.hud_layout_label)
 
             self.hud_summary = Gtk.Label()
             self.hud_summary.add_css_class("hud-summary"); self.hud_summary.set_xalign(0)
@@ -1603,6 +1705,11 @@ class Companion(Gtk.Application):
             self.hud_tip.add_css_class("hud-tip"); self.hud_tip.set_xalign(0)
             self.hud_tip.set_wrap(True); self.hud_tip.set_max_width_chars(56)
             self.hud_expanded_box.append(self.hud_tip)
+
+            self.hud_target = Gtk.Label()
+            self.hud_target.add_css_class("hud-target"); self.hud_target.set_xalign(0)
+            self.hud_target.set_wrap(True); self.hud_target.set_max_width_chars(56)
+            self.hud_expanded_box.append(self.hud_target)
             box.append(self.hud_expanded_box)
 
             self.hud_context = Gtk.Label()
@@ -1698,9 +1805,26 @@ class Companion(Gtk.Application):
                 padding: 2px 6px;
             }}
             .hud-title {{ font-size: 14px; font-weight: 700; color: #f6efe0; }}
+            .hud-layout {{ font-size: 11.5px; font-weight: 600; color: #7be3f0; }}
             .hud-summary {{ font-size: 12px; color: #c7d5e5; }}
             .hud-detail {{ font-size: 12px; color: #d5e0ec; }}
             .hud-tip {{ font-size: 11.5px; color: #ecc06c; }}
+            .hud-target {{ font-size: 11px; font-weight: 600; color: #9cd6b2; }}
+            .hud-milestone {{
+                font-size: 11.5px;
+                font-weight: 700;
+                color: #8bf2b5;
+                background: rgba(20, 56, 36, 0.90);
+                border: 1px solid rgba(64, 178, 112, 0.75);
+                border-radius: 6px;
+                padding: 4px 8px;
+            }}
+            .hud-tag {{
+                font-size: 9.5px;
+                font-weight: 700;
+                border-radius: 9px;
+                padding: 1px 6px;
+            }}
             .hud-context {{ font-size: 11px; color: #8da2b8; }}
             .hud-progress trough {{ background: rgba(29, 42, 58, 0.85); min-height: 4px; border-radius: 4px; }}
             .hud-progress progress {{ background: #d9a44b; min-height: 4px; border-radius: 4px; }}
@@ -1804,7 +1928,7 @@ class Companion(Gtk.Application):
                 self._client_log_discovery_ticks = 0
                 self._init_client_log_tailer()
             return GLib.SOURCE_CONTINUE
-        zones = self.client_log_tailer.poll_zones()
+        zones, level_ups = self.client_log_tailer.poll_events()
         for zone in zones:
             matched = match_campaign_step(
                 self.campaign, self.store.data["act"], self.store.data["step"], zone
@@ -1820,7 +1944,39 @@ class Companion(Gtk.Application):
                 self.refresh_campaign()
                 if self.status is not None:
                     self.status.set_text(f"Entered {zone} · advanced to Act {matched[0] + 1}, Step {matched[1] + 1}")
+        for char_name, level in level_ups:
+            self._handle_level_up(char_name, level)
         return GLib.SOURCE_CONTINUE
+
+    def _handle_level_up(self, char_name: str, level: int):
+        self.detected_char = char_name
+        self.detected_level = level
+        nxt = next_level_milestone(level)
+        if hasattr(self, "level_status_label"):
+            next_txt = f" · Next: Lv {nxt[0]}" if nxt else ""
+            self.level_status_label.set_text(f"{char_name} · Lv {level}{next_txt}")
+        cue = level_milestone_cue(level, self.current_build(), self.store.data["act"] + 1)
+        if cue:
+            banner_text = f"★ {cue}"
+            if hasattr(self, "milestone_banner"):
+                self.milestone_banner.set_text(banner_text)
+                self.milestone_banner.set_visible(True)
+            if hasattr(self, "hud_milestone"):
+                self.hud_milestone.set_text(banner_text)
+                self.hud_milestone.set_visible(True)
+                GLib.idle_add(self._sync_hud_input_region)
+            if self._milestone_timer_id is not None:
+                GLib.source_remove(self._milestone_timer_id)
+            self._milestone_timer_id = GLib.timeout_add(25000, self._clear_hud_milestone)
+            if self.status is not None:
+                self.status.set_text(banner_text)
+
+    def _clear_hud_milestone(self):
+        self._milestone_timer_id = None
+        if hasattr(self, "hud_milestone"):
+            self.hud_milestone.set_visible(False)
+            GLib.idle_add(self._sync_hud_input_region)
+        return GLib.SOURCE_REMOVE
 
     def _sync_hud_input_region(self):
         if self.hud is not None and self.hud.get_visible() and self.hud.get_surface() is not None:
@@ -2058,6 +2214,7 @@ class Companion(Gtk.Application):
         self.populate_linked_loadouts(build)
         self.refresh_loadout_views(build)
         self.refresh_passive_tree(build)
+        self.refresh_regex_list()
         self.update_context()
 
     def render_notes(self, notes: str):
@@ -2575,17 +2732,61 @@ class Companion(Gtk.Application):
             self.context_label.set_text(text)
         if hasattr(self, "hud_context"):
             self.hud_context.set_text(text)
+        if hasattr(self, "copy_build_regex_btn"):
+            auto_rx = generate_build_vendor_regex(build)
+            self.copy_build_regex_btn.set_visible(auto_rx is not None)
+
+    def _on_copy_build_vendor_regex(self, *_):
+        auto_rx = generate_build_vendor_regex(self.current_build())
+        if auto_rx:
+            self._copy_regex(auto_rx["regex"], auto_rx["title"])
+
+    @staticmethod
+    def _tag_css_class(tag: str) -> str:
+        low = tag.lower()
+        if "passive" in low:
+            return "tag-passive"
+        if "trial" in low:
+            return "tag-trial"
+        if "resist" in low:
+            return "tag-resist"
+        if "bench" in low:
+            return "tag-bench"
+        return "tag-vendor"
+
+    def _populate_step_tags(self, container: Gtk.Box, tags: list[str], hud_style: bool = False):
+        self._clear_box(container)
+        for tag in tags:
+            lbl = Gtk.Label(label=tag)
+            lbl.add_css_class("hud-tag" if hud_style else "step-tag")
+            lbl.add_css_class(self._tag_css_class(tag))
+            container.append(lbl)
+        container.set_visible(bool(tags))
 
     def refresh_campaign(self):
         act = self.store.data["act"]
-        steps = self.campaign[act]["steps"]
+        act_data = self.campaign[act]
+        steps = act_data["steps"]
         step = min(max(self.store.data["step"], 0), len(steps) - 1)
         self.store.data["step"] = step
         item = steps[step]
         fraction = (step + 1) / max(1, len(steps))
+        tags = item.get("tags") or []
+        layout_tell = (item.get("layout") or "").strip()
+        target = act_data.get("target") or {}
+
         self.step_label.set_text(f"Act {act+1} · Step {step+1} of {len(steps)} · {item['title']}")
         self.detail_label.set_text(item["detail"])
         self.tip_label.set_text(item["tip"])
+        if hasattr(self, "step_tags_box"):
+            self._populate_step_tags(self.step_tags_box, tags, hud_style=False)
+        if hasattr(self, "layout_box"):
+            self.layout_label.set_text(layout_tell)
+            self.layout_box.set_visible(bool(layout_tell))
+        if hasattr(self, "act_target_life"):
+            self.act_target_life.set_text(f"❤ {target.get('life', 'Stack Life')}")
+            self.act_target_resists.set_text(f"🛡 {target.get('resists', 'Cap Elemental Resists')}")
+            self.act_target_note.set_text(target.get("note", ""))
         if hasattr(self, "campaign_progress"):
             self.campaign_progress.set_fraction(fraction)
         if hasattr(self, "campaign_step_list"):
@@ -2616,13 +2817,23 @@ class Companion(Gtk.Application):
             finally:
                 self._updating_campaign_list = False
         if self.hud is not None:
-            self.hud_act.set_text(f"ACT {act+1} · {self.campaign[act]['title'].upper()} · {step+1}/{len(steps)}")
+            self.hud_act.set_text(f"ACT {act+1} · {act_data['title'].upper()} · {step+1}/{len(steps)}")
             self.hud_title.set_text(item["title"])
+            if hasattr(self, "hud_tags_box"):
+                self._populate_step_tags(self.hud_tags_box, tags, hud_style=True)
+            if hasattr(self, "hud_layout_label"):
+                self.hud_layout_label.set_text(f"🧭 {layout_tell}" if layout_tell else "")
+                self.hud_layout_label.set_visible(bool(layout_tell))
             self.hud_summary.set_text(compact_step_summary(item["detail"]))
             self.hud_detail.set_text(item["detail"])
             self.hud_tip.set_text("Tip · " + item["tip"])
+            if hasattr(self, "hud_target"):
+                t_parts = [p for p in (target.get("life"), target.get("resists")) if p]
+                self.hud_target.set_text("Target · " + " · ".join(t_parts) if t_parts else "")
+                self.hud_target.set_visible(bool(t_parts))
             if hasattr(self, "hud_progress"):
                 self.hud_progress.set_fraction(fraction)
+            GLib.idle_add(self._sync_hud_input_region)
         self.update_context()
         self.persist_state()
 
@@ -2732,8 +2943,12 @@ class Companion(Gtk.Application):
         self._clear_box(self.regex_cards_box)
         query = self.regex_search_entry.get_text().strip().lower() if hasattr(self, "regex_search_entry") else ""
         cat = self.regex_category_filter
+        items = list(self.regex_presets)
+        auto_rx = generate_build_vendor_regex(self.current_build())
+        if auto_rx is not None:
+            items.insert(0, auto_rx)
         shown = 0
-        for preset in self.regex_presets:
+        for preset in items:
             if cat != "All" and preset.get("category") != cat:
                 continue
             hay = f"{preset.get('title', '')} {preset.get('regex', '')} {preset.get('note', '')}".lower()

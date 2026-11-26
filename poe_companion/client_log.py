@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 _ENTERED_ZONE_RE = re.compile(r":\s*You have entered ([^.\r\n]+)\.\s*$")
+_LEVEL_UP_RE = re.compile(r":\s*([^\r\n:]+?)\s+\(([^)]+)\)\s+is now level\s+(\d+)\s*$")
 _LEVEL_SUFFIX_RE = re.compile(r"\s+level\s+\d+$", re.IGNORECASE)
 _VDF_PATH_RE = re.compile(r'"path"\s+"([^"]+)"')
 _MAX_VDF_BYTES = 256 * 1024
@@ -27,6 +28,23 @@ def parse_entered_zone(line: str) -> str | None:
         return None
     zone = match.group(1).strip()
     return zone or None
+
+
+def parse_level_up(line: str) -> tuple[str, int] | None:
+    """Extract (character_name, level) from a PoE 1 Client.txt level-up line."""
+    if not isinstance(line, str) or "is now level " not in line:
+        return None
+    match = _LEVEL_UP_RE.search(line)
+    if not match:
+        return None
+    name = match.group(1).strip()
+    try:
+        level = int(match.group(3))
+    except ValueError:
+        return None
+    if not name or not (1 <= level <= 100):
+        return None
+    return name, level
 
 
 def _steam_library_roots(home: Path) -> list[Path]:
@@ -141,28 +159,29 @@ class ClientLogTailer:
             self._offset = 0
             self._partial = ""
 
-    def poll_zones(self, max_bytes: int = 65536) -> list[str]:
+    def poll_events(self, max_bytes: int = 65536) -> tuple[list[str], list[tuple[str, int]]]:
+        """Return (entered_zones, level_ups) newly appended since the last poll."""
         try:
             st = self.path.stat()
         except OSError:
-            return []
+            return [], []
         if self._inode is None:
             self._inode = st.st_ino
             self._offset = st.st_size
-            return []
+            return [], []
         if st.st_ino != self._inode or st.st_size < self._offset:
             self._inode = st.st_ino
             self._offset = 0
             self._partial = ""
         if st.st_size == self._offset:
-            return []
+            return [], []
         to_read = min(max_bytes, st.st_size - self._offset)
         try:
             with self.path.open("rb") as handle:
                 handle.seek(self._offset)
                 chunk = handle.read(to_read)
         except OSError:
-            return []
+            return [], []
         self._offset += len(chunk)
         text = self._partial + chunk.decode("utf-8", errors="replace")
         lines = text.splitlines(keepends=True)
@@ -170,9 +189,18 @@ class ClientLogTailer:
             self._partial = lines.pop()
         else:
             self._partial = ""
-        zones = []
+        zones: list[str] = []
+        levels: list[tuple[str, int]] = []
         for line in lines:
             zone = parse_entered_zone(line)
             if zone:
                 zones.append(zone)
+                continue
+            lvl = parse_level_up(line)
+            if lvl:
+                levels.append(lvl)
+        return zones, levels
+
+    def poll_zones(self, max_bytes: int = 65536) -> list[str]:
+        zones, _ = self.poll_events(max_bytes=max_bytes)
         return zones

@@ -15,7 +15,7 @@ A native Linux/Wayland Path of Exile 1 build desk, passive skill tree viewer, an
 - Import public `pobb.in` share links (HTTPS `/ID/raw` and `/u/user/ID/raw`), PoB Community share codes, or raw XML exports (offline).
 - Hero build dashboard with stat pills, full-height **Build notes** with inline search and native PoB `^0`–`^9` / `^xRRGGBB` color rendering.
 - **Visual Loadouts:** PoE-styled rarity item cards (Unique/Rare/Magic/Normal), visual **Gem Link Cards** with color-coded socket dots and link bars, linked loadout switching, and instant gear/gem filtering.
-- **Vendor & Stash Regex Helper (`Regex` tab):** one-click copyable PoE search regex presets (3-links, movement speed boots, caster wands, life + resists, safe maps) plus custom saved presets in `~/.config/poe-companion/regexes.json`.
+- **Vendor & Stash Regex Helper (`Regex` tab):** one-click copyable PoE search regex presets (3-links, movement speed boots, caster wands, life + resists, safe maps), **auto-generated build vendor regex** from your active build's gem socket colors (always within PoE's 250-char limit), plus custom saved presets in `~/.config/poe-companion/regexes.json`.
 - Keeps saved builds and campaign progress locally in `~/.local/share/poe-companion/state.json`.
 
 ### Interactive Passive Skill Tree
@@ -26,9 +26,15 @@ A native Linux/Wayland Path of Exile 1 build desk, passive skill tree viewer, an
 - *Read-only:* cluster-jewel, tattoo, and override transformations are not calculated.
 
 ### In-Game Leveling HUD & Run Timer (Acts 1–10)
+- **New-player "Hand-Hold" Leveling Guide:**
+  - **Zone Layout Tells:** concise navigation rules on every Act 1–10 step (e.g., broken road in Crossroads, torch pillars in Vaal Ruins, waypoint side tells) shown on both the Campaign tab and in-game HUD.
+  - **Level-Up Milestone Alerts:** detects `is now level N` in `Client.txt` and flashes vendor/gem/Lab reminders right on the HUD and Campaign banner (Lv 4, 8, 12, 16, 18, 24, 28, 31, 33, 38, 55, 68).
+  - **Action Tag Badges:** color-coded badges (`+1 Passive`, `Lab Trial`, `Resist Check`, `Vendor`, `Crafting Bench`) so you never miss skill books, trials, or Kitava resist checks.
+  - **Per-Act Survival Targets:** life & elemental resist benchmarks for every act right on the Campaign tab and expanded HUD.
+  - **1-Click Build Vendor Regex:** copy a vendor search regex tailored to your active PoB build's exact socket colors right from the Campaign tab or Regex library.
 - **Interactive Act Checklist & Live Run Timer:** clickable step timeline on the Campaign tab with Start/Pause/Reset timer, automatic **Act 1–10 splits**, and an optional timer pill on the in-game HUD.
 - **Compact by default:** slim bar with act/step badge, progress bar, step title, and one-line cue; expands on demand for full route details, beginner tips, and build/gem reminders.
-- **Automatic `Client.txt` tracking:** discovers Steam/Proton PoE logs (including secondary Steam library drives via `libraryfolders.vdf`), tails `You have entered ...` lines incrementally, and advances matching campaign steps and act splits automatically.
+- **Automatic `Client.txt` tracking:** discovers Steam/Proton PoE logs (including secondary Steam library drives via `libraryfolders.vdf`), tails `You have entered ...` and level-up lines incrementally, and advances matching campaign steps, milestone alerts, and act splits automatically.
 - **Live HUD settings & Preview:** configure enable/disable, compact bar, clickable mini-buttons, HUD timer, screen position (`Top center`, `Top right`, `Top left`, `Bottom center`, `Bottom left`), opacity, `Client.txt` auto-tracking, and **Preview HUD** (persisted in `~/.config/poe-companion/hud.json`).
 - **Optional CLI hotkeys** (instant local socket dispatch): `--next-step`, `--prev-step`, `--toggle-compact`, `--toggle-hud`, and `--toggle-clickable`.
 
