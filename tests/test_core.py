@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
 from unittest import mock
@@ -21,6 +22,7 @@ from poe_companion.tree_canvas import (PassiveTreeCanvas, connector_stroke_width
                                        is_ascendancy_visible, search_matching_nodes, zoom_pan_offset)
 from poe_companion.client_log import ClientLogTailer, discover_client_log, match_campaign_step, parse_entered_zone
 from poe_companion.notes import format_note_spans, plain_note_summary, strip_color_escapes
+from poe_companion import tray
 
 ROOT = Path(__file__).parents[1]
 
@@ -831,6 +833,69 @@ class ToolsAndQoLTests(unittest.TestCase):
                 self.assertTrue((step.get("layout") or "").strip(), f"Missing layout tell for {step['title']}")
                 self.assertIsInstance(step.get("tags"), list)
         self.assertEqual(app_module.compact_step_summary("First sentence. Second sentence."), "First sentence.")
+
+
+class TrayTests(unittest.TestCase):
+    def test_toggle_label_and_menu_layout(self):
+        self.assertEqual(tray.toggle_label(True), "Hide planner")
+        self.assertEqual(tray.toggle_label(False), "Show planner")
+        self.assertEqual(tray.menu_layout(False), (0, {"children-display": "submenu"}, [
+            (1, {"label": "Show planner"}, []),
+            (2, {"type": "separator"}, []),
+            (3, {"label": "Quit"}, []),
+        ]))
+        self.assertEqual(tray.menu_layout(True, 1), (1, {"label": "Hide planner"}, []))
+        self.assertIsNone(tray.menu_layout(True, 99))
+
+    def test_menu_item_properties_filters_and_bounds(self):
+        self.assertEqual([i for i, _ in tray.menu_item_properties(True, [])], [1, 2, 3])
+        self.assertEqual([i for i, _ in tray.menu_item_properties(True, None)], [1, 2, 3])
+        self.assertEqual(tray.menu_item_properties(True, [3, 42]), [(3, {"label": "Quit"})])
+        self.assertEqual(tray.menu_item_properties(True, [0] * tray.MAX_MENU_IDS + [3]), [])
+
+    def test_menu_action_mapping(self):
+        self.assertEqual(tray.menu_action(1, "clicked"), "toggle-planner")
+        self.assertEqual(tray.menu_action(3, "clicked"), "quit")
+        self.assertIsNone(tray.menu_action(2, "clicked"))
+        self.assertIsNone(tray.menu_action(0, "clicked"))
+        self.assertIsNone(tray.menu_action(42, "clicked"))
+        self.assertIsNone(tray.menu_action(3, "hovered"))
+
+    def test_item_identity_and_bus_name(self):
+        self.assertEqual(tray.item_bus_name(1234), "org.kde.StatusNotifierItem-1234-1")
+        self.assertEqual(tray.ITEM_PROPERTIES["IconName"], ("s", "applications-games"))
+        self.assertEqual(tray.ITEM_PROPERTIES["Title"][1], "Wraeclast Companion")
+        self.assertEqual(tray.ITEM_PROPERTIES["ToolTip"][1][2], "Wraeclast Companion")
+        self.assertEqual(tray.ITEM_PROPERTIES["Menu"], ("o", "/MenuBar"))
+        self.assertEqual(tray.ITEM_PROPERTIES["ItemIsMenu"], ("b", False))
+
+    def test_interface_xml_matches_property_tables(self):
+        cases = [
+            (tray.ITEM_INTERFACE_XML, "org.kde.StatusNotifierItem", tray.ITEM_PROPERTIES),
+            (tray.MENU_INTERFACE_XML, "com.canonical.dbusmenu", tray.MENU_PROPERTIES),
+        ]
+        for xml_text, iface_name, table in cases:
+            root = ET.fromstring(xml_text)
+            iface = next(i for i in root.findall("interface") if i.get("name") == iface_name)
+            props = iface.findall("property")
+            self.assertEqual({p.get("name"): p.get("type") for p in props},
+                             {k: v[0] for k, v in table.items()})
+            for p in props:
+                self.assertEqual(p.get("access"), "read")
+            if iface_name == "org.kde.StatusNotifierItem":
+                methods = {m.get("name") for m in iface.findall("method")}
+                self.assertEqual(methods, {"Activate", "SecondaryActivate", "ContextMenu", "Scroll"})
+            else:
+                methods = {m.get("name") for m in iface.findall("method")}
+                self.assertEqual(methods, {"GetLayout", "GetGroupProperties", "GetProperty", "Event",
+                                           "EventGroup", "AboutToShow", "AboutToShowGroup"})
+                signals = {s.get("name") for s in iface.findall("signal")}
+                self.assertIn("LayoutUpdated", signals)
+
+    def test_tray_module_is_gtk_free(self):
+        source = (ROOT / "poe_companion/tray.py").read_text()
+        self.assertNotIn("import gi", source)
+        self.assertNotIn("from gi", source)
 
 
 if __name__ == "__main__":
