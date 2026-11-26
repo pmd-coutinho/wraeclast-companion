@@ -47,6 +47,7 @@ from .client_log import ClientLogTailer, discover_client_log, match_campaign_ste
 from .tools import (RunTimer, compute_tree_diff, format_duration, gem_socket_color,
                     generate_build_vendor_regex, is_support_gem, level_milestone_cue,
                     load_regex_presets, next_level_milestone, parse_item_card, save_custom_regexes)
+from . import tray
 
 APP_ID = "org.poecompanion.Companion"
 DATA = Path.home() / ".local/share/poe-companion"
@@ -292,6 +293,44 @@ def notify(message: str) -> bool:
         return False
 
 
+def _dbus_value(value) -> GLib.Variant:
+    if isinstance(value, bool):
+        return GLib.Variant("b", value)
+    if isinstance(value, int):
+        return GLib.Variant("i", value)
+    return GLib.Variant("s", str(value))
+
+
+def _dbus_props(props: dict) -> dict:
+    return {key: _dbus_value(value) for key, value in props.items()}
+
+
+def _menu_node_tuple(node: tuple) -> tuple:
+    item_id, props, children = node
+    return (item_id, _dbus_props(props),
+            [GLib.Variant("(ia{sv}av)", _menu_node_tuple(child)) for child in children])
+
+
+def _property_variants(properties: dict) -> dict:
+    return {name: GLib.Variant(signature, value) for name, (signature, value) in properties.items()}
+
+
+def _handle_properties_call(properties: dict, method: str, params, invocation):
+    if method == "Get":
+        _interface, name = params.unpack()
+        spec = properties.get(name)
+        if spec is None:
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownProperty", f"Unknown property {name}")
+            return
+        invocation.return_value(GLib.Variant("(v)", (GLib.Variant(spec[0], spec[1]),)))
+    elif method == "GetAll":
+        invocation.return_value(GLib.Variant("(a{sv})", (_property_variants(properties),)))
+    elif method == "Set":
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.PropertyReadOnly", "Tray properties are read-only")
+    else:
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", f"Unknown method {method}")
+
+
 class Companion(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
@@ -303,6 +342,12 @@ class Companion(Gtk.Application):
         self.niri_tracker = False
         self.last_focus_update = 0.0
         self.dbus_owner_id = 0
+        self.tray_connection = None
+        self.tray_bus_name = ""
+        self.tray_owner_id = 0
+        self.tray_watch_id = 0
+        self.tray_registration_ids = []
+        self.tray_menu_revision = 1
         self.planner = None
         self.hud = None
         self.hud_css = None
@@ -357,11 +402,13 @@ class Companion(Gtk.Application):
             self.build_ui()
             self.start_control_socket()
             self.start_compositor_tracker()
+            self.start_tray()
         self.planner.present()
         if self.store.read_only_reason:
             self.status.set_text(self.store.read_only_reason)
 
     def do_shutdown(self):
+        self.stop_tray()
         if self.dbus_owner_id:
             try:
                 Gio.bus_unown_name(self.dbus_owner_id)
@@ -374,11 +421,177 @@ class Companion(Gtk.Application):
             pass
         Gtk.Application.do_shutdown(self)
 
+    def show_planner(self):
+        if self.planner is None:
+            return
+        self.planner.present()
+
+    def hide_planner(self):
+        if self.planner is None:
+            return
+        if self.import_dialog is not None:
+            self.import_dialog.close()
+        self.planner.set_visible(False)
+
+    def toggle_planner(self):
+        if self.planner is None:
+            return
+        if self.planner.get_visible():
+            self.hide_planner()
+        else:
+            self.show_planner()
+
+    def _on_planner_close_request(self, _window):
+        # Keep the window object alive so the tray (or a relaunch) can show it again.
+        # Without a HUD window nothing else keeps the app alive today, so quit as before.
+        self.hide_planner()
+        if self.hud is None:
+            self.quit()
+        return True
+
+    def _run_tray_action(self, action: str):
+        if action == tray.ACTION_TOGGLE_PLANNER:
+            self.toggle_planner()
+        elif action == tray.ACTION_QUIT:
+            self.quit()
+        return GLib.SOURCE_REMOVE
+
+    def _on_tray_item_call(self, _conn, _sender, _path, iface, method, params, invocation):
+        if iface == tray.PROPERTIES_INTERFACE:
+            _handle_properties_call(tray.ITEM_PROPERTIES, method, params, invocation)
+            return
+        if method in ("Activate", "SecondaryActivate", "ContextMenu", "Scroll"):
+            invocation.return_value(GLib.Variant("()", ()))
+            if method == "Activate":
+                GLib.idle_add(self._run_tray_action, tray.ACTION_TOGGLE_PLANNER)
+            return
+        invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", f"Unknown method {method}")
+
+    def _on_tray_menu_call(self, _conn, _sender, _path, iface, method, params, invocation):
+        if iface == tray.PROPERTIES_INTERFACE:
+            _handle_properties_call(tray.MENU_PROPERTIES, method, params, invocation)
+            return
+        visible = self.planner is not None and self.planner.get_visible()
+        if method == "GetLayout":
+            parent_id, _depth, _names = params.unpack()
+            node = tray.menu_layout(visible, parent_id)
+            if node is None:
+                invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs", "Unknown menu item")
+                return
+            invocation.return_value(GLib.Variant("(u(ia{sv}av))", (self.tray_menu_revision, _menu_node_tuple(node))))
+        elif method == "GetGroupProperties":
+            ids, _names = params.unpack()
+            items = [(item_id, _dbus_props(props)) for item_id, props in tray.menu_item_properties(visible, ids)]
+            invocation.return_value(GLib.Variant("(a(ia{sv}))", (items,)))
+        elif method == "GetProperty":
+            item_id, name = params.unpack()
+            props = dict(tray.menu_item_properties(visible, [item_id])).get(item_id, {})
+            if name not in props:
+                invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs", "Unknown menu property")
+                return
+            invocation.return_value(GLib.Variant("(v)", (_dbus_value(props[name]),)))
+        elif method == "Event":
+            item_id, event_id, _data, _timestamp = params.unpack()
+            invocation.return_value(GLib.Variant("()", ()))
+            action = tray.menu_action(item_id, event_id)
+            if action is not None:
+                GLib.idle_add(self._run_tray_action, action)
+        elif method == "EventGroup":
+            events = params.unpack()[0][:tray.MAX_MENU_EVENTS]
+            errors = []
+            for item_id, event_id, _data, _timestamp in events:
+                if item_id not in tray.MENU_ITEM_IDS:
+                    errors.append(item_id)
+                    continue
+                action = tray.menu_action(item_id, event_id)
+                if action is not None:
+                    GLib.idle_add(self._run_tray_action, action)
+            invocation.return_value(GLib.Variant("(ai)", (errors,)))
+        elif method == "AboutToShow":
+            invocation.return_value(GLib.Variant("(b)", (False,)))
+        elif method == "AboutToShowGroup":
+            invocation.return_value(GLib.Variant("(aiai)", ([], [])))
+        else:
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", f"Unknown method {method}")
+
+    def start_tray(self):
+        try:
+            connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            item_info = Gio.DBusNodeInfo.new_for_xml(tray.ITEM_INTERFACE_XML).interfaces[0]
+            menu_info = Gio.DBusNodeInfo.new_for_xml(tray.MENU_INTERFACE_XML).interfaces[0]
+            self.tray_connection = connection
+            self.tray_registration_ids.append(
+                connection.register_object(tray.ITEM_PATH, item_info, self._on_tray_item_call, None, None))
+            self.tray_registration_ids.append(
+                connection.register_object(tray.MENU_PATH, menu_info, self._on_tray_menu_call, None, None))
+            self.tray_bus_name = tray.item_bus_name(os.getpid())
+            self.tray_owner_id = Gio.bus_own_name_on_connection(
+                connection, self.tray_bus_name, Gio.BusNameOwnerFlags.NONE, self._on_tray_name_acquired, None)
+        except Exception as exc:
+            print(f"Tray icon unavailable: {exc}", file=sys.stderr)
+            self.stop_tray()
+            return
+        self.planner.connect("notify::visible", self._on_planner_visibility_changed)
+
+    def _on_tray_name_acquired(self, connection, _name):
+        if self.tray_watch_id == 0:
+            try:
+                self.tray_watch_id = Gio.bus_watch_name_on_connection(
+                    connection, tray.WATCHER_NAME, Gio.BusNameWatcherFlags.NONE,
+                    self._on_tray_watcher_appeared, None)
+            except Exception as exc:
+                print(f"Tray icon unavailable: {exc}", file=sys.stderr)
+
+    def _on_tray_watcher_appeared(self, connection, _name, _owner):
+        # Runs each time the watcher appears, so a host started later (or restarted) gets the icon.
+        connection.call(tray.WATCHER_NAME, tray.WATCHER_PATH, tray.WATCHER_INTERFACE,
+                        "RegisterStatusNotifierItem", GLib.Variant("(s)", (self.tray_bus_name,)),
+                        None, Gio.DBusCallFlags.NO_AUTO_START, 2000, None, self._on_tray_registered)
+
+    def _on_tray_registered(self, connection, result):
+        try:
+            connection.call_finish(result)
+        except GLib.Error as exc:
+            print(f"Tray host did not accept the tray icon: {exc.message}", file=sys.stderr)
+
+    def _on_planner_visibility_changed(self, *_):
+        self.tray_menu_revision = self.tray_menu_revision % 2_000_000_000 + 1
+        if self.tray_connection is None:
+            return
+        try:
+            self.tray_connection.emit_signal(None, tray.MENU_PATH, tray.MENU_INTERFACE, "LayoutUpdated",
+                                             GLib.Variant("(ui)", (self.tray_menu_revision, tray.MENU_ROOT_ID)))
+        except GLib.Error as exc:
+            print(f"Could not update the tray menu: {exc.message}", file=sys.stderr)
+
+    def stop_tray(self):
+        if self.tray_watch_id:
+            try:
+                Gio.bus_unwatch_name(self.tray_watch_id)
+            except Exception:
+                pass
+            self.tray_watch_id = 0
+        if self.tray_owner_id:
+            try:
+                Gio.bus_unown_name(self.tray_owner_id)
+            except Exception:
+                pass
+            self.tray_owner_id = 0
+        if self.tray_connection is not None:
+            for reg_id in self.tray_registration_ids:
+                try:
+                    self.tray_connection.unregister_object(reg_id)
+                except Exception:
+                    pass
+        self.tray_registration_ids = []
+        self.tray_connection = None
+
     def build_ui(self):
         self.planner = Gtk.ApplicationWindow(application=self, title="Wraeclast Companion")
         self.planner.set_default_size(1240, 820)
         self.planner.set_size_request(760, 560)
         self.planner.add_css_class("planner-window")
+        self.planner.connect("close-request", self._on_planner_close_request)
 
         # Modern integrated client-side HeaderBar
         headerbar = Gtk.HeaderBar()

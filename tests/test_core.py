@@ -6,8 +6,10 @@ import tempfile
 import unittest
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from poe_companion.pob import (ImportError, _PobbinRedirectHandler, decode_share_code,
@@ -21,6 +23,7 @@ from poe_companion.tree_canvas import (PassiveTreeCanvas, connector_stroke_width
                                        is_ascendancy_visible, search_matching_nodes, zoom_pan_offset)
 from poe_companion.client_log import ClientLogTailer, discover_client_log, match_campaign_step, parse_entered_zone
 from poe_companion.notes import format_note_spans, plain_note_summary, strip_color_escapes
+from poe_companion import tray
 
 ROOT = Path(__file__).parents[1]
 
@@ -831,6 +834,208 @@ class ToolsAndQoLTests(unittest.TestCase):
                 self.assertTrue((step.get("layout") or "").strip(), f"Missing layout tell for {step['title']}")
                 self.assertIsInstance(step.get("tags"), list)
         self.assertEqual(app_module.compact_step_summary("First sentence. Second sentence."), "First sentence.")
+
+
+class _FakeInvocation:
+    def __init__(self):
+        self.value = None
+        self.error = None
+
+    def return_value(self, value):
+        self.value = value
+
+    def return_dbus_error(self, name, message):
+        self.error = (name, message)
+
+
+class TrayTests(unittest.TestCase):
+    def test_toggle_label_and_menu_layout(self):
+        self.assertEqual(tray.toggle_label(True), "Hide planner")
+        self.assertEqual(tray.toggle_label(False), "Show planner")
+        self.assertEqual(tray.menu_layout(False), (0, {"children-display": "submenu"}, [
+            (1, {"label": "Show planner"}, []),
+            (2, {"type": "separator"}, []),
+            (3, {"label": "Quit"}, []),
+        ]))
+        self.assertEqual(tray.menu_layout(True, 1), (1, {"label": "Hide planner"}, []))
+        self.assertIsNone(tray.menu_layout(True, 99))
+
+    def test_menu_item_properties_filters_and_bounds(self):
+        self.assertEqual([i for i, _ in tray.menu_item_properties(True, [])], [1, 2, 3])
+        self.assertEqual([i for i, _ in tray.menu_item_properties(True, None)], [1, 2, 3])
+        self.assertEqual(tray.menu_item_properties(True, [3, 42]), [(3, {"label": "Quit"})])
+        self.assertEqual(tray.menu_item_properties(True, [0] * tray.MAX_MENU_IDS + [3]), [])
+
+    def test_menu_action_mapping(self):
+        self.assertEqual(tray.menu_action(1, "clicked"), "toggle-planner")
+        self.assertEqual(tray.menu_action(3, "clicked"), "quit")
+        self.assertIsNone(tray.menu_action(2, "clicked"))
+        self.assertIsNone(tray.menu_action(0, "clicked"))
+        self.assertIsNone(tray.menu_action(42, "clicked"))
+        self.assertIsNone(tray.menu_action(3, "hovered"))
+
+    def test_item_identity_and_bus_name(self):
+        self.assertEqual(tray.item_bus_name(1234), "org.kde.StatusNotifierItem-1234-1")
+        self.assertEqual(tray.ITEM_PROPERTIES["IconName"], ("s", "applications-games"))
+        self.assertEqual(tray.ITEM_PROPERTIES["Title"][1], "Wraeclast Companion")
+        self.assertEqual(tray.ITEM_PROPERTIES["ToolTip"][1][2], "Wraeclast Companion")
+        self.assertEqual(tray.ITEM_PROPERTIES["Menu"], ("o", "/MenuBar"))
+        self.assertEqual(tray.ITEM_PROPERTIES["ItemIsMenu"], ("b", False))
+
+    def test_interface_xml_matches_property_tables(self):
+        cases = [
+            (tray.ITEM_INTERFACE_XML, "org.kde.StatusNotifierItem", tray.ITEM_PROPERTIES),
+            (tray.MENU_INTERFACE_XML, "com.canonical.dbusmenu", tray.MENU_PROPERTIES),
+        ]
+        for xml_text, iface_name, table in cases:
+            root = ET.fromstring(xml_text)
+            iface = next(i for i in root.findall("interface") if i.get("name") == iface_name)
+            props = iface.findall("property")
+            self.assertEqual({p.get("name"): p.get("type") for p in props},
+                             {k: v[0] for k, v in table.items()})
+            for p in props:
+                self.assertEqual(p.get("access"), "read")
+            if iface_name == "org.kde.StatusNotifierItem":
+                methods = {m.get("name") for m in iface.findall("method")}
+                self.assertEqual(methods, {"Activate", "SecondaryActivate", "ContextMenu", "Scroll"})
+            else:
+                methods = {m.get("name") for m in iface.findall("method")}
+                self.assertEqual(methods, {"GetLayout", "GetGroupProperties", "GetProperty", "Event",
+                                           "EventGroup", "AboutToShow", "AboutToShowGroup"})
+                signals = {s.get("name") for s in iface.findall("signal")}
+                self.assertIn("LayoutUpdated", signals)
+
+    def test_tray_module_is_gtk_free(self):
+        source = (ROOT / "poe_companion/tray.py").read_text()
+        self.assertNotIn("import gi", source)
+        self.assertNotIn("from gi", source)
+
+    def test_menu_layout_variant_round_trips(self):
+        v = app_module.GLib.Variant("(u(ia{sv}av))", (5, app_module._menu_node_tuple(tray.menu_layout(True))))
+        self.assertEqual(v.get_type_string(), "(u(ia{sv}av))")
+        self.assertEqual(v.unpack(), (5, tray.menu_layout(True)))
+
+    def test_interface_xml_parses_with_gio(self):
+        item = app_module.Gio.DBusNodeInfo.new_for_xml(tray.ITEM_INTERFACE_XML)
+        self.assertEqual(item.interfaces[0].name, "org.kde.StatusNotifierItem")
+        menu = app_module.Gio.DBusNodeInfo.new_for_xml(tray.MENU_INTERFACE_XML)
+        self.assertEqual(menu.interfaces[0].name, "com.canonical.dbusmenu")
+
+    def test_properties_get_getall_and_set(self):
+        GLib = app_module.GLib
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.ITEM_PROPERTIES, "Get",
+                                           GLib.Variant("(ss)", (tray.ITEM_INTERFACE, "IconName")), inv)
+        self.assertEqual(inv.value.unpack(), ("applications-games",))
+
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.ITEM_PROPERTIES, "GetAll",
+                                           GLib.Variant("(s)", (tray.ITEM_INTERFACE,)), inv)
+        self.assertEqual(inv.value.unpack()[0]["ToolTip"], ("applications-games", [], "Wraeclast Companion", ""))
+
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.ITEM_PROPERTIES, "Get",
+                                           GLib.Variant("(ss)", (tray.ITEM_INTERFACE, "Nope")), inv)
+        self.assertEqual(inv.error[0], "org.freedesktop.DBus.Error.UnknownProperty")
+
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.ITEM_PROPERTIES, "Set",
+                                           GLib.Variant("(ssv)", (tray.ITEM_INTERFACE, "IconName",
+                                                                  GLib.Variant("s", "x"))), inv)
+        self.assertEqual(inv.error[0], "org.freedesktop.DBus.Error.PropertyReadOnly")
+
+        inv = _FakeInvocation()
+        app_module._handle_properties_call(tray.MENU_PROPERTIES, "GetAll",
+                                           GLib.Variant("(s)", (tray.MENU_INTERFACE,)), inv)
+        self.assertEqual(inv.value.unpack()[0], {"Version": 3, "TextDirection": "ltr",
+                                                 "Status": "normal", "IconThemePath": []})
+
+    def test_menu_call_layout_and_events_dispatch_actions(self):
+        GLib = app_module.GLib
+        fake = SimpleNamespace(planner=None, tray_menu_revision=7, _run_tray_action=mock.Mock())
+        call = app_module.Companion._on_tray_menu_call
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "GetLayout",
+             GLib.Variant("(iias)", (0, -1, [])), inv)
+        self.assertEqual(inv.value.unpack(), (7, tray.menu_layout(False)))
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "GetLayout",
+             GLib.Variant("(iias)", (99, -1, [])), inv)
+        self.assertEqual(inv.error[0], "org.freedesktop.DBus.Error.InvalidArgs")
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "GetProperty",
+             GLib.Variant("(is)", (1, "label")), inv)
+        self.assertEqual(inv.value.unpack(), ("Show planner",))
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "Event",
+                 GLib.Variant("(isvu)", (3, "clicked", GLib.Variant("s", ""), 0)), inv)
+            idle_add.assert_called_once_with(fake._run_tray_action, "quit")
+            self.assertEqual(inv.value.unpack(), ())
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "Event",
+                 GLib.Variant("(isvu)", (2, "clicked", GLib.Variant("s", ""), 0)), inv)
+            idle_add.assert_not_called()
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.MENU_PATH, tray.MENU_INTERFACE, "EventGroup",
+                 GLib.Variant("(a(isvu))", ([(1, "clicked", GLib.Variant("s", ""), 0),
+                                             (42, "clicked", GLib.Variant("s", ""), 0)],)), inv)
+            self.assertEqual(inv.value.unpack(), ([42],))
+            idle_add.assert_called_once_with(fake._run_tray_action, "toggle-planner")
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.MENU_PATH, tray.PROPERTIES_INTERFACE, "Get",
+             GLib.Variant("(ss)", (tray.MENU_INTERFACE, "Version")), inv)
+        self.assertEqual(inv.value.unpack(), (3,))
+
+    def test_item_call_activate_toggles_planner(self):
+        GLib = app_module.GLib
+        fake = SimpleNamespace(_run_tray_action=mock.Mock())
+        call = app_module.Companion._on_tray_item_call
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.ITEM_PATH, tray.ITEM_INTERFACE, "Activate",
+                 GLib.Variant("(ii)", (0, 0)), inv)
+            idle_add.assert_called_once_with(fake._run_tray_action, "toggle-planner")
+            self.assertEqual(inv.value.unpack(), ())
+
+        with mock.patch.object(GLib, "idle_add") as idle_add:
+            inv = _FakeInvocation()
+            call(fake, None, ":1.1", tray.ITEM_PATH, tray.ITEM_INTERFACE, "ContextMenu",
+                 GLib.Variant("(ii)", (0, 0)), inv)
+            idle_add.assert_not_called()
+            self.assertEqual(inv.value.unpack(), ())
+
+        inv = _FakeInvocation()
+        call(fake, None, ":1.1", tray.ITEM_PATH, tray.ITEM_INTERFACE, "Boom", GLib.Variant("()", ()), inv)
+        self.assertEqual(inv.error[0], "org.freedesktop.DBus.Error.UnknownMethod")
+
+    def test_run_tray_action_toggles_and_quits(self):
+        fake = SimpleNamespace(toggle_planner=mock.Mock(), quit=mock.Mock())
+        run = app_module.Companion._run_tray_action
+
+        self.assertEqual(run(fake, "toggle-planner"), app_module.GLib.SOURCE_REMOVE)
+        fake.toggle_planner.assert_called_once_with()
+        fake.quit.assert_not_called()
+
+        fake.toggle_planner.reset_mock()
+        run(fake, "quit")
+        fake.quit.assert_called_once_with()
+        fake.toggle_planner.assert_not_called()
+
+        fake.quit.reset_mock()
+        run(fake, "other")
+        fake.quit.assert_not_called()
+        fake.toggle_planner.assert_not_called()
 
 
 if __name__ == "__main__":
